@@ -30,7 +30,22 @@ commonSrcFiles := \
    voice/stream.c \
    voice/session.c \
    voice/voice.c \
-   voice/effect.c
+   voice/effect.c \
+   aspllib/aspl_nr.c \
+   aspllib/ccode/audioEQ_biquad.c \
+   aspllib/ccode/audio_utils.c \
+   aspllib/ccode/autogaincontrol.c \
+   aspllib/ccode/beamforming.c \
+   aspllib/ccode/dB_scale.c \
+   aspllib/ccode/echo_canceller.c \
+   aspllib/ccode/level_mon.c \
+   aspllib/ccode/noise_supression.c \
+   aspllib/ccode/pffft.c \
+   aspllib/ccode/polyphase.c \
+   aspllib/ccode/debug_file_aspl.c \
+   aspllib/ccode/ssl_core.c	\
+   aspllib/ccode/ssl_vad.c \
+   aspllib/ccode/time_constant.c
 
 ifeq ($(strip $(BOARD_USE_AUDIO_PREPROCESS)), true)
     commonSrcFiles += effects.c
@@ -40,8 +55,10 @@ commonCIncludes := \
    $(call include-path-for, audio-utils) \
    $(call include-path-for, audio-route) \
    $(call include-path-for, speex) \
-   $(LOCAL_PATH)/libaec_bf_process/include
-
+   $(LOCAL_PATH)/libaec_bf_process/include \
+   $(LOCAL_PATH)/aspllib/include \
+   $(LOCAL_PATH)/aspllib/ccode \
+   
 commonCFlags := -Wno-unused-parameter
 commonCFlags += -DLIBTINYALSA_ENABLE_VNDK_EXT
 ifneq ($(filter box atv, $(strip $(TARGET_BOARD_PLATFORM_PRODUCT))), )

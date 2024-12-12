@@ -1684,6 +1684,46 @@ static int aec_apply_effects(struct stream_in *in)
 }
 
 
+static int aec_apply_effects_ASPL(struct stream_in *in)
+{
+    size_t frames;
+    size_t copy;
+    int ret;
+
+    //ALOGD("%s enter, quirk = %#x\n", __FUNCTION__, in->aec_handle.quirks);
+
+    frames = in->aec_handle.config->period_size;
+    copy = pcm_frames_to_bytes(in->pcm, frames);
+
+    /* NOTE: If the recording is mono, we need to turn it to stereo */
+    if (in->aec_handle.config->channels == 2) {
+        size_t samples = copy / 2;
+        if (in->aec_handle.quirks & VOICE_STREAM_CHANNEL_MONO_RIGHT)
+            channel_fixed(in->aec_handle.buffer, samples, CHR_VALID);
+
+        if (in->aec_handle.quirks & VOICE_STREAM_CHANNEL_MONO_LEFT)
+            channel_fixed(in->aec_handle.buffer, samples, CHL_VALID);
+    }
+
+
+    /*
+     * NOTE: If the stream is outgoing and the recording has reference channel,
+     * we should apply AEC with rockchip audio preprocess to remove echoes.
+     */
+    ret = voice_effect_processASPL(&in->aec_handle.effect, in->aec_handle.buffer, frames);
+    if (ret) {
+        ALOGE("%s: failed to process with effect", __FUNCTION__);
+        return 0;
+    }
+
+    copy >>= 1;
+    memcpy(in->buffer, in->aec_handle.effect.stereo_buffer, copy);
+
+    return copy;
+}
+
+
+
 static void dump_in_effectdata(const void* buffer, size_t bytes)
 {
     static int rest = 0;

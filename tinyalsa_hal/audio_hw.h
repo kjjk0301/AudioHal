@@ -186,6 +186,7 @@ struct aec_process
 {
     pthread_mutex_t effect_lock;
     struct voice_effect effect;
+	struct voice_effect_aspl effect_ASPL;
     int quirks;
     struct pcm_config *config;
     int16_t *buffer;
