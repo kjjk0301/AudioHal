@@ -88,6 +88,8 @@ static struct pcm_config pcm_config = {
     .format = PCM_FORMAT_S16_LE,
 };
 
+
+//ASPL This is Setting
 static struct pcm_config pcm_config_in = {
     #ifdef RK_NEW_EFFECT_ENABLE
     #if PCM_REFERENCE_CHANNELS

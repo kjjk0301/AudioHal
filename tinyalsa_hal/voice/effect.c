@@ -100,6 +100,78 @@ err:
     return ret;
 }
 
+int voice_effect_init_ASPL(struct voice_effect *effect, unsigned int rate,
+                      unsigned int channels, unsigned int frames, unsigned int bits)
+{
+    int ref_channels = NUM_REF_CHANNEL;
+    int src_channels = channels - NUM_REF_CHANNEL;
+    /* NOTE: Frames for pcm_read is default to the period of a pcm configuration */
+    size_t mono_buffer_size = frames * 1 * (bits >> 3);
+    size_t stereo_buffer_size = frames * 2 * (bits >> 3);
+    int ret;
+
+    if (125 != (rate/(frames>>1))) {
+        ALOGE("%s: got rate %u frames %u, expected rate %u frames %u", __FUNCTION__,
+              rate, frames, VOICE_PREPROCESS_RATE, VOICE_PREPROCESS_RATE*2/125);
+        ret = -EINVAL;
+        goto err;
+    }
+#if 0
+    memset(&effect->rk_param, 0, sizeof(RKAUDIOParam));
+    effect->rk_param.model_en = RKAUDIO_EN_AEC | RKAUDIO_EN_BF;
+    effect->rk_param.aec_param = rkaudio_aec_param_init();
+    effect->rk_param.bf_param = rkaudio_preprocess_param_init();
+    effect->rk_param.rx_param = rkaudio_rx_param_init();
+    effect->rk_preprocess = rkaudio_preprocess_init(rate, bits, src_channels, ref_channels,
+                                                    &effect->rk_param);
+    if (!effect->rk_preprocess) {
+        ALOGE("%s: failed to init rockchip preprocess", __FUNCTION__);
+        ret = -EINVAL;
+        goto err;
+    }
+#else
+	// ASPL Algorithm Init
+	
+
+
+#endif
+
+
+    effect->mono_buffer = malloc(mono_buffer_size);
+    if (!effect->mono_buffer) {
+        ALOGE("%s: failed to allocate mono buffer, expected size %zu", __FUNCTION__,
+              mono_buffer_size);
+        ret = -ENOMEM;
+        goto deinit_preprocess;
+    }
+
+    effect->stereo_buffer = malloc(stereo_buffer_size);
+    if (!effect->stereo_buffer) {
+        ALOGE("%s: failed to allocate stereo buffer, expected size %zu", __FUNCTION__,
+              stereo_buffer_size);
+        ret = -ENOMEM;
+        goto free_mono_buffer;
+    }
+
+    rkaudio_param_printf(src_channels, ref_channels, &effect->rk_param);
+
+    effect->channels = channels;
+
+    return 0;
+
+free_mono_buffer:
+    free(effect->mono_buffer);
+
+deinit_preprocess:
+    rkaudio_preprocess_destory(effect->rk_preprocess);
+    rkaudio_param_deinit(&effect->rk_param);
+
+err:
+    return ret;
+}
+
+
+
 int voice_effect_process(struct voice_effect *effect, void *src, size_t frames)
 {
     int targ_doa;
