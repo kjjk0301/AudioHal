@@ -31,6 +31,7 @@ commonSrcFiles := \
    voice/session.c \
    voice/voice.c \
    voice/effect.c \
+   aspllib/ResampleFilter.c \
    aspllib/aspl_nr.c \
    aspllib/ccode/audioEQ_biquad.c \
    aspllib/ccode/audio_utils.c \

@@ -38,9 +38,9 @@ void channel_fixed(void *data, unsigned len, uint32_t flag)
     src = ch0;
     dest = ch0;
 
-    if (flag & CHL_VALID)
+    if (flag & CHL_VALID) // Ch0 -> Ch1
         dest = ch1;
-    else if (flag & CHR_VALID)
+    else if (flag & CHR_VALID) // // Ch1 -> Ch0
         src = ch1;
 
     for (i = 0; i < len; i += 2)

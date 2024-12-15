@@ -181,7 +181,7 @@ struct dev_info
     int score;
 };
 
-#ifdef RK_COMMON_AEC_ENABLE
+//#ifdef RK_COMMON_AEC_ENABLE
 struct aec_process
 {
     pthread_mutex_t effect_lock;
@@ -192,7 +192,7 @@ struct aec_process
     int16_t *buffer;
     size_t frames_in;
 };
-#endif
+//#endif
 
 
 struct audio_device {
@@ -241,6 +241,7 @@ struct audio_device {
     #ifdef RK_COMMON_AEC_ENABLE
     bool   aec_running;
     #endif
+	bool   aec_running;
 };
 
 struct stream_out {
@@ -338,9 +339,11 @@ struct stream_in {
     audio_patch_handle_t patch_handle; // Patch handle for this stream
     struct listnode list_node;
 
-#ifdef RK_COMMON_AEC_ENABLE
-    struct aec_process aec_handle;
-#endif
+//#ifdef RK_COMMON_AEC_ENABLE
+//    struct aec_process aec_handle;
+//#endif
+	struct aec_process aec_handle;
+
 
 #ifdef BUIDIN_MIC_VOLUME_FADEIN_ENABLE
     int buidin_mic_mute_samples;

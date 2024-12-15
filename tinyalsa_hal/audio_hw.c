@@ -102,7 +102,7 @@ static struct pcm_config pcm_config_in = {
     #endif
     .rate = 48000,
     #ifdef RK_NEW_EFFECT_ENABLE
-    .period_size = 768, //480,   // 10ms
+    .period_size = 768*2, //480,   // 10ms
     #else
     .period_size = 480,   // 10ms
     #endif
@@ -125,7 +125,7 @@ static struct pcm_config pcm_config_in_low_latency = {
 static struct pcm_config pcm_config_in_with_ref = {
     .channels = 4,
     .rate = 48000,//8000,
-    .period_size = 768,//128,   // 10ms
+    .period_size = 768*2,//128,   // 10ms
     .period_count = 4,
     .format = PCM_FORMAT_S16_LE,
 };
@@ -133,7 +133,7 @@ static struct pcm_config pcm_config_in_with_ref = {
 static struct pcm_config pcm_config_in_low_latency_with_ref = {
     .channels = 4,
     .rate = 48000,//8000,
-    .period_size = 768,//128,
+    .period_size = 768*2,//128,
     .period_count = 4,
     .format = PCM_FORMAT_S16_LE,
 };
@@ -1508,6 +1508,127 @@ static int start_output_stream(struct stream_out *out)
 
 
 
+
+
+static void aec_processor_release_ASPL(struct stream_in *in)
+{
+    if(/*input device*/in->aec_handle.quirks & VOICE_DEVICE_CHANNEL_HAS_REFERENCE)
+    {
+        pthread_mutex_lock(&in->aec_handle.effect_lock);
+
+        ALOGD("%s: enter", __FUNCTION__);
+        voice_effect_release_ASPL(&in->aec_handle.effect);
+
+        in->aec_handle.quirks = 0;
+        in->aec_handle.config = NULL;
+        if(in->aec_handle.buffer)
+        {
+            free(in->aec_handle.buffer);
+            in->aec_handle.buffer = NULL;
+        }
+        in->dev->aec_running = false;
+
+        pthread_mutex_unlock(&in->aec_handle.effect_lock);
+    }
+}
+
+static int aec_processor_init_ASPL(struct stream_in *in)
+{
+    ALOGD("%s enter\n", __FUNCTION__);
+
+    if(in->dev->aec_running)
+    {
+        aec_processor_release_ASPL(in);
+    }
+
+    pthread_mutex_lock(&in->aec_handle.effect_lock);
+
+    in->dev->aec_running = true;
+
+    in->aec_handle.config = &pcm_config_in;
+		//in->flags & AUDIO_INPUT_FLAG_FAST ?
+        //                 &pcm_config_in_low_latency_with_ref : &pcm_config_in_with_ref;
+
+    int ret = voice_effect_init_ASPL(&in->aec_handle.effect, in->aec_handle.config->rate,
+                                in->aec_handle.config->channels,
+                                in->aec_handle.config->period_size,
+                                pcm_format_to_bits(in->aec_handle.config->format));
+    if (ret)
+    {
+        ALOGE("%s: failed to initialize effect", __FUNCTION__);
+        goto clean_aec;
+    }
+
+    in->aec_handle.buffer = malloc(in->aec_handle.config->period_size * in->aec_handle.config->channels
+                        * audio_stream_in_frame_size(&in->stream));
+    if (!in->aec_handle.buffer) {
+        in->aec_handle.config = NULL;
+
+        if(in->aec_handle.effect.rk_preprocess)
+        {
+            voice_effect_release_ASPL(&in->aec_handle.effect);
+        }
+        ret = -ENOMEM;
+        goto clean_aec;
+    }
+
+    pthread_mutex_unlock(&in->aec_handle.effect_lock);
+
+    return ret;
+
+clean_aec:
+    in->dev->aec_running = false;
+
+    pthread_mutex_unlock(&in->aec_handle.effect_lock);
+
+    return ret;
+}
+
+static int aec_apply_effects_ASPL(struct stream_in *in)
+{
+    size_t frames;
+    size_t copy;
+    int ret;
+	int i;
+	double DoAVal;
+	
+
+    //ALOGD("%s enter, quirk = %#x\n", __FUNCTION__, in->aec_handle.quirks);
+
+    frames = in->aec_handle.config->period_size;
+    copy = pcm_frames_to_bytes(in->pcm, frames);
+
+    /* NOTE: If the recording is mono, we need to turn it to stereo */
+    if (in->aec_handle.config->channels == 2) {
+        size_t samples = copy / 2;
+        if (in->aec_handle.quirks & VOICE_STREAM_CHANNEL_MONO_RIGHT)
+            channel_fixed(in->aec_handle.buffer, samples, CHR_VALID);
+
+        if (in->aec_handle.quirks & VOICE_STREAM_CHANNEL_MONO_LEFT)
+            channel_fixed(in->aec_handle.buffer, samples, CHL_VALID);
+    }
+
+	// Do Data align
+
+
+
+    /*
+     * NOTE: If the stream is outgoing and the recording has reference channel,
+     * we should apply AEC with rockchip audio preprocess to remove echoes.
+     */
+    ret = voice_effect_processASPL(&in->aec_handle.effect, in->aec_handle.buffer, frames);
+    if (ret) {
+        ALOGE("%s: failed to process with effect", __FUNCTION__);
+        return 0;
+    }
+
+    copy >>= 1;
+    memcpy(in->buffer, in->aec_handle.effect.stereo_buffer, copy);
+
+    return copy;
+}
+
+
 #ifdef RK_COMMON_AEC_ENABLE
 static bool is_aec_device(struct stream_in *in, int card, int device)
 {
@@ -1595,6 +1716,11 @@ static void aec_processor_release(struct stream_in *in)
 }
 
 
+
+
+
+
+
 static int aec_processor_init(struct stream_in *in)
 {
     ALOGD("%s enter\n", __FUNCTION__);
@@ -1602,6 +1728,7 @@ static int aec_processor_init(struct stream_in *in)
     if(in->dev->aec_running)
     {
         aec_processor_release(in);
+//		aec_processor_release_ASPL(in);
     }
 
     pthread_mutex_lock(&in->aec_handle.effect_lock);
@@ -1630,6 +1757,8 @@ static int aec_processor_init(struct stream_in *in)
         {
             voice_effect_release(&in->aec_handle.effect);
         }
+//		voice_effect_release_ASPL(&in->aec_handle.effect);
+
         ret = -ENOMEM;
         goto clean_aec;
     }
@@ -1647,6 +1776,10 @@ clean_aec:
 }
 
 
+
+
+
+#if 1
 static int aec_apply_effects(struct stream_in *in)
 {
     size_t frames;
@@ -1684,45 +1817,9 @@ static int aec_apply_effects(struct stream_in *in)
 
     return copy;
 }
+#endif
 
 
-static int aec_apply_effects_ASPL(struct stream_in *in)
-{
-    size_t frames;
-    size_t copy;
-    int ret;
-
-    //ALOGD("%s enter, quirk = %#x\n", __FUNCTION__, in->aec_handle.quirks);
-
-    frames = in->aec_handle.config->period_size;
-    copy = pcm_frames_to_bytes(in->pcm, frames);
-
-    /* NOTE: If the recording is mono, we need to turn it to stereo */
-    if (in->aec_handle.config->channels == 2) {
-        size_t samples = copy / 2;
-        if (in->aec_handle.quirks & VOICE_STREAM_CHANNEL_MONO_RIGHT)
-            channel_fixed(in->aec_handle.buffer, samples, CHR_VALID);
-
-        if (in->aec_handle.quirks & VOICE_STREAM_CHANNEL_MONO_LEFT)
-            channel_fixed(in->aec_handle.buffer, samples, CHL_VALID);
-    }
-
-
-    /*
-     * NOTE: If the stream is outgoing and the recording has reference channel,
-     * we should apply AEC with rockchip audio preprocess to remove echoes.
-     */
-    ret = voice_effect_processASPL(&in->aec_handle.effect, in->aec_handle.buffer, frames);
-    if (ret) {
-        ALOGE("%s: failed to process with effect", __FUNCTION__);
-        return 0;
-    }
-
-    copy >>= 1;
-    memcpy(in->buffer, in->aec_handle.effect.stereo_buffer, copy);
-
-    return copy;
-}
 
 
 
@@ -2000,6 +2097,7 @@ static int get_next_buffer(struct resampler_buffer_provider *buffer_provider,
             dump_in_rawdata(in->aec_handle.buffer, size);
 
             size = aec_apply_effects(in);
+			//size = aec_apply_effects_ASPL(in);
         }
         else
         #endif
@@ -2063,8 +2161,12 @@ static int get_next_buffer(struct resampler_buffer_provider *buffer_provider,
          * in all effects, and the frame count is assinged to the period size
          * before the resampler.
          */
-        audio_effect_process(&in->effects, (void *)in->buffer, (void *)in->buffer,
-                             in->config->period_size);
+
+		size = aec_apply_effects_ASPL(in);
+
+//        audio_effect_process(&in->effects, (void *)in->buffer, (void *)in->buffer,
+//                             in->config->period_size);
+		
         dump_in_comm_effectdata(buffer->i16, (buffer->frame_count*audio_channel_count_from_in_mask(in->channel_mask))<<1);
         #endif
 
@@ -2100,6 +2202,115 @@ static int get_next_buffer(struct resampler_buffer_provider *buffer_provider,
     return in->read_status;
 
 }
+
+#if 0
+static int get_next_buffer_ASPL(struct resampler_buffer_provider *buffer_provider,
+                           struct resampler_buffer* buffer)
+{
+    struct stream_in *in;
+    size_t i,size;
+
+    if (buffer_provider == NULL || buffer == NULL)
+        return -EINVAL;
+
+    in = (struct stream_in *)((char *)buffer_provider -
+                              offsetof(struct stream_in, buf_provider));
+
+    if (in->pcm == NULL) {
+        buffer->raw = NULL;
+        buffer->frame_count = 0;
+        in->read_status = -ENODEV;
+        return -ENODEV;
+    }
+
+    if (in->frames_in == 0) {
+        {
+            size = pcm_frames_to_bytes(in->pcm, in->config->period_size);
+            in->read_status = pcm_read(in->pcm,
+                                       (void*)in->buffer, size);
+
+            #ifdef BUIDIN_MIC_VOLUME_FADEIN_ENABLE
+            if(0 < in->buidin_mic_mute_samples)
+            {
+                in->buidin_mic_mute_samples -= in->config->period_size;
+                memset(in->buffer, 0, size);
+                //ALOGD("%s %d: droped noise data %d at starting, rest %d periods", __func__, __LINE__, size, in->buidin_mic_mute_samples);
+                in->fade_volume = BUILDIN_MIC_FADE_START_VOLUME;
+            } else if(1.0f > in->fade_volume) {
+                in->fade_volume += BUILDIN_MIC_FADE_VOLUME_STEP;
+                if(1.0f <= in->fade_volume)
+                    in->fade_volume = 1.0f;
+                else {
+                    int16_t* pdata = in->buffer;
+                    for(size_t idx=0; idx<(size>>1); idx++, pdata++){
+                        *pdata = *pdata * in->fade_volume;
+                    }
+					//ALOGD("%s: fade_volume = %f", __func__, in->fade_volume);
+                }
+            }
+            #endif
+ 
+			dump_in_rawdata(in->buffer, size);
+
+            if (in->read_status != 0) {
+                ALOGE("get_next_buffer() pcm_read error %d", in->read_status);
+                buffer->raw = NULL;
+                buffer->frame_count = 0;
+                return in->read_status;
+            }
+        }
+
+        if (in->config->channels == 2 && (!(in->device == AUDIO_DEVICE_IN_HDMI))) {
+            if (in->channel_flag & CH_CHECK) {
+                if (in->start_checkcount < SAMPLECOUNT) {
+                    in->start_checkcount += size;
+                } else {
+                    in->channel_flag = channel_check((void*)in->buffer, size / 2);
+                    in->channel_flag &= ~CH_CHECK;
+                }
+            }
+            channel_fixed((void*)in->buffer, size / 2, in->channel_flag & ~CH_CHECK);
+        }
+		
+		size = aec_apply_effects(in);
+		dump_in_comm_effectdata(buffer->i16, (buffer->frame_count*audio_channel_count_from_in_mask(in->channel_mask))<<1);
+
+		
+        //fwrite(in->buffer,pcm_frames_to_bytes(in->pcm,pcm_get_buffer_size(in->pcm)),1,in_debug);
+        in->frames_in = in->config->period_size;
+
+        /* Do stereo to mono conversion in place by discarding right channel */
+        if ((in->channel_mask == AUDIO_CHANNEL_IN_MONO)
+                &&(in->config->channels == 2)) {
+            //ALOGE("channel_mask = AUDIO_CHANNEL_IN_MONO");
+            for (i = 0; i < in->frames_in; i++)
+                in->buffer[i] = in->buffer[i * 2];
+        }
+
+    }
+
+    //ALOGV("pcm_frames_to_bytes(in->pcm,pcm_get_buffer_size(in->pcm)):%d",size);
+    buffer->frame_count = (buffer->frame_count > in->frames_in) ?
+                          in->frames_in : buffer->frame_count;
+    buffer->i16 = in->buffer +
+                  (in->config->period_size - in->frames_in) *
+                  audio_channel_count_from_in_mask(in->channel_mask);
+
+    #ifdef RK_COMMON_AEC_ENABLE
+	if(is_aec_running(in->dev))
+        dump_in_effectdata(buffer->i16, (buffer->frame_count*audio_channel_count_from_in_mask(in->channel_mask))<<1);
+    #endif
+
+    #if defined(BUIDIN_MIC_VOLUME_PROCESS) && !defined(RK_NEW_EFFECT_ENABLE)
+        in_apply_volume(in->device, buffer->i16, (buffer->frame_count*audio_channel_count_from_in_mask(in->channel_mask)));
+    #endif
+
+    return in->read_status;
+
+}
+#endif
+
+
 
 /**
  * @brief release_buffer
@@ -2304,6 +2515,7 @@ static int start_input_stream(struct stream_in *in)
         }
     } else {
         ALOGD("open build mic");
+		// ASPL 
         in->config = &pcm_config_in;
         card = adev->dev_in[SND_IN_SOUND_CARD_MIC].card;
         device =  adev->dev_in[SND_IN_SOUND_CARD_MIC].device;
@@ -2312,8 +2524,10 @@ static int start_input_stream(struct stream_in *in)
             route_pcm_card_open(card, getRouteFromDevice(in->device | AUDIO_DEVICE_BIT_IN));
 
             #ifdef RK_COMMON_AEC_ENABLE
-            if(is_aec_device(in, card, device) && is_aec_available(in)
-                && 0 == aec_processor_init(in))
+//            if(is_aec_device(in, card, device) && is_aec_available(in)
+//                && 0 == aec_processor_init(in))
+			
+			if(0 == aec_processor_init_ASPL(in))
             {
                 in->config = in->aec_handle.config;
 
@@ -2494,6 +2708,8 @@ frame_count :
                 frames_rd,
             };
             if (get_next_buffer(&in->buf_provider, &buf))
+//			if (get_next_buffer_ASPL(&in->buf_provider, &buf))
+
                 break;
             if (buf.raw != NULL) {
                 memcpy((char *)buffer +
