@@ -12,14 +12,13 @@
 
 typedef struct UpdamplerContext
 {
-    short* Int16InputBuffer;
-    short* Int16OutputBuffer;
+//    short* Int16InputBuffer;
+//    short* Int16OutputBuffer;
     unsigned short  FilterOrder;
     unsigned short  CurrentBufferSz;
     unsigned short  MaxBufferSz;
-    double* FilterWindow;
-    double* History;
-    double* FilterCoef;
+    double FilterWindow[LP_PASS_TAPS3];
+    double FilterCoef[LP_PASS_TAPS3];
 }UpdamplerContext;
 
 

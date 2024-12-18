@@ -30,3 +30,12 @@ void audio_effect_process(struct listnode *effects, void *in, void *out, size_t 
 void audio_effect_process_reverse(struct listnode *effects, void *in, void *out, size_t frames);
 void audio_effect_set_config(struct listnode *effects, effect_config_t *config);
 void audio_effect_set_config_reverse(struct listnode *effects, effect_config_t *config);
+
+
+void audio_effect_process_ASPL(void *in, void *out, size_t frames);
+int audio_effect_init_ASPL(unsigned int rate,unsigned int channels, unsigned int frames, unsigned int bits);
+void audio_effect_release_ASPL(struct voice_effect *effect);
+
+
+
+

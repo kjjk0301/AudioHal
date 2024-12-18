@@ -14,14 +14,18 @@ double pLowPassFilter6[LP_PASS_TAPS6] = { 0.000619955265981611,	0.00200323648535
 
 int CreateResampler(UpdamplerContext* pContext, unsigned short MaxBufferSz, unsigned short FilterTaps, double* pFIlter)
 {
-    pContext->MaxBufferSz = MaxBufferSz;
-    pContext->FilterOrder = FilterTaps;
-    pContext->FilterWindow = NULL;
+	int i;
 
-    pContext->FilterWindow = (double*)malloc(FilterTaps * sizeof(double));
-    if (pContext->FilterWindow == NULL) return 0;
-    memset(pContext->FilterWindow, 0, FilterTaps * sizeof(double));
-    pContext->FilterCoef = pFIlter;
+	pContext->MaxBufferSz = MaxBufferSz;
+    pContext->FilterOrder = FilterTaps;
+
+	for(i=0;i<FilterTaps;i++)
+		pContext->FilterWindow[i]=0.0;
+
+	
+	for(i=0;i<FilterTaps;i++)
+			pContext->FilterCoef[i]=pFIlter[i];
+	
     return 1;
 }
 
@@ -50,7 +54,9 @@ void DoUpsample(UpdamplerContext* pContext, short* pIn, short* pOut,unsigned sho
         pOut[i] = (short)(FilterSum * 32768.0 * MultVal);
 
         // Slide
-        memcpy(&pContext->FilterWindow[0], &pContext->FilterWindow[1], (pContext->FilterOrder - 1) * sizeof(double));
+        for(j=0;j<pContext->FilterOrder-1;j++)
+			pContext->FilterWindow[j]=pContext->FilterWindow[j+1];
+//        memcpy(&pContext->FilterWindow[0], &pContext->FilterWindow[1], (pContext->FilterOrder - 1) * sizeof(double));
     }
 }
 
@@ -61,6 +67,11 @@ void DoDnsample(UpdamplerContext* pContext, short* pIn, short* pOut, unsigned sh
     double FilterMult;
 
     k = 0;
+
+	printf(" ASPL DN sample order %d  %f %f",pContext->FilterOrder,pContext->FilterCoef[0],pContext->FilterCoef[pContext->FilterOrder-1]);
+	printf(" ASPL DN sample order %d  %f %f",pContext->FilterOrder,pContext->FilterWindow[0],pContext->FilterWindow[pContext->FilterOrder-1]);
+
+	
     for (i = 0; i < Sz; i++)
     {
         // Get i'th Input
@@ -78,16 +89,15 @@ void DoDnsample(UpdamplerContext* pContext, short* pIn, short* pOut, unsigned sh
             pOut[k++] = (short)(FilterSum* 32768. * MultVal);
 
         // Slide
-        memcpy(&pContext->FilterWindow[0], &pContext->FilterWindow[1], (pContext->FilterOrder - 1) * sizeof(double));
+		for(j=0;j<pContext->FilterOrder-1;j++)
+			pContext->FilterWindow[j]=pContext->FilterWindow[j+1];
+		
     }
 }
 
 void DestroyResampler(UpdamplerContext* pContext)
 {
-    if (pContext->FilterWindow != NULL) free(pContext->FilterWindow);
-    if (pContext->FilterCoef != NULL) pContext->FilterCoef = NULL;
-    if (pContext->Int16InputBuffer != NULL) pContext->Int16InputBuffer = NULL;
-    if (pContext->Int16OutputBuffer != NULL) pContext->Int16OutputBuffer = NULL;
+//    if (pContext->FilterCoef != NULL) pContext->FilterCoef = NULL;
     pContext->CurrentBufferSz = 0;
     pContext->FilterOrder = 0;
     pContext->MaxBufferSz = 0;

@@ -40,11 +40,7 @@
 
 #define VOICE_PREPROCESS_RATE 8000
 
-UpdamplerContext DownSampleHandle[4];
 
-
-
-UpdamplerContext UpSampleHandle;
 
 
 
@@ -112,99 +108,7 @@ err:
     return ret;
 }
 
-int voice_effect_init_ASPL(struct voice_effect *effect, unsigned int rate,
-                      unsigned int channels, unsigned int frames, unsigned int bits)
-{
-    int ref_channels = NUM_REF_CHANNEL;
-    int src_channels = channels - NUM_REF_CHANNEL;
-	int rc;
-    /* NOTE: Frames for pcm_read is default to the period of a pcm configuration */
-    size_t mono_buffer_size = frames * 1 * (bits >> 3);
-    size_t stereo_buffer_size = frames * 2 * (bits >> 3);
-    int ret;
 
-    if (125 != (rate/(frames>>1))) {
-        ALOGE("%s: got rate %u frames %u, expected rate %u frames %u", __FUNCTION__,
-              rate, frames, VOICE_PREPROCESS_RATE, VOICE_PREPROCESS_RATE*2/125);
-        ret = -EINVAL;
-        goto err;
-    }
-#if 0
- 
-#else
-	// ASPL Algorithm Init
-	//aspl_NR_create(NULL);
-	rc=CreateResampler(&DownSampleHandle[0],768*4,LP_PASS_TAPS3,pLowPassFilter3);
-	if (rc != 1) {
-		  ALOGE(" Error Creating ASPL Resampler!!");
-		  ret = -EINVAL;
-		  goto err;
-	}
-	rc=CreateResampler(&DownSampleHandle[1],768*4,LP_PASS_TAPS3,pLowPassFilter3);
-	if (rc != 1) {
-		  ALOGE(" Error Creating ASPL Resampler!!");
-		  ret = -EINVAL;
-		  goto err;
-	}
-	rc=CreateResampler(&DownSampleHandle[2],768*4,LP_PASS_TAPS3,pLowPassFilter3);
-	if (rc != 1) {
-		  ALOGE(" Error Creating ASPL Resampler!!");
-		  ret = -EINVAL;
-		  goto err;
-	}
-	rc=CreateResampler(&DownSampleHandle[3],768*4,LP_PASS_TAPS3,pLowPassFilter3);
-	if (rc != 1) {
-		  ALOGE(" Error Creating ASPL Resampler!!");
-		  ret = -EINVAL;
-		  goto err;
-	}
-	rc=CreateResampler(&UpSampleHandle,768*4,LP_PASS_TAPS3,pLowPassFilter3);
-		if (rc != 1) {
-			  ALOGE(" Error Creating ASPL Resampler!!");
-			  ret = -EINVAL;
-			  goto err;
-		}
-
-
-	aspl_NR_create_2mic(NULL);
-#endif
-
-	    effect->mono_buffer = malloc(mono_buffer_size);
-		if (!effect->mono_buffer) {
-			ALOGE("%s: failed to allocate mono buffer, expected size %zu", __FUNCTION__,
-				  mono_buffer_size);
-			ret = -ENOMEM;
-			goto deinit_preprocess;
-		}
-	
-		effect->stereo_buffer = malloc(stereo_buffer_size);
-		if (!effect->stereo_buffer) {
-			ALOGE("%s: failed to allocate stereo buffer, expected size %zu", __FUNCTION__,
-				  stereo_buffer_size);
-			ret = -ENOMEM;
-			goto free_mono_buffer;
-		}
-	
-		effect->channels = channels;
-	
-		return 0;
-	
-free_mono_buffer:
-		free(effect->mono_buffer);
-
-deinit_preprocess:
-
-	DestroyResampler(&DownSampleHandle[0]);
-	DestroyResampler(&DownSampleHandle[1]);
-	DestroyResampler(&DownSampleHandle[2]);
-	DestroyResampler(&DownSampleHandle[3]);
-	DestroyResampler(&UpSampleHandle);
-	aspl_NR_destroy();
-
-
-err:
-    return ret;
-}
 
 
 
@@ -230,6 +134,7 @@ int voice_effect_process(struct voice_effect *effect, void *src, size_t frames)
 }
 
 
+#if 0
 short AsplSrcBuf[2][512];
 short AsplRefBuf[2][512];
 short TempResample[768*2];
@@ -279,6 +184,7 @@ int voice_effect_processASPL(struct voice_effect *effect, void *src, size_t fram
 
     return 0;
 }
+#endif
 
 void voice_effect_release(struct voice_effect *effect)
 {
@@ -302,17 +208,5 @@ void voice_effect_release(struct voice_effect *effect)
     ALOGD("%s: end\n", __func__);
 }
 
-void voice_effect_release_ASPL(struct voice_effect *effect)
-{
-    ALOGD("%s: begin\n", __func__);
-	
-	DestroyResampler(&DownSampleHandle[0]);
-	DestroyResampler(&DownSampleHandle[1]);
-	DestroyResampler(&DownSampleHandle[2]);
-	DestroyResampler(&DownSampleHandle[3]);
-	DestroyResampler(&UpSampleHandle);
-	aspl_NR_destroy();
 
-    ALOGD("%s: end\n", __func__);
-}
 

@@ -80,6 +80,9 @@
 #define PCM_REFERENCE_CHANNELS 2
 #endif
 
+unsigned int gUSE_ASPL=0;
+
+
 static struct pcm_config pcm_config = {
     .channels = 2,
     .rate = 48000,
@@ -90,7 +93,7 @@ static struct pcm_config pcm_config = {
 
 
 //ASPL This is Setting
-static struct pcm_config pcm_config_in = {
+static struct pcm_config pcm_config_in_a = {
     #ifdef RK_NEW_EFFECT_ENABLE
     #if PCM_REFERENCE_CHANNELS
         .channels = PCM_CAPTURE_CHANNELS + PCM_REFERENCE_CHANNELS,
@@ -109,6 +112,29 @@ static struct pcm_config pcm_config_in = {
     .period_count = 4,
     .format = PCM_FORMAT_S16_LE,
 };
+
+static struct pcm_config pcm_config_in = {
+    #ifdef RK_NEW_EFFECT_ENABLE
+    #if PCM_REFERENCE_CHANNELS
+        .channels = PCM_CAPTURE_CHANNELS + PCM_REFERENCE_CHANNELS,
+    #else
+        .channels = PCM_CAPTURE_CHANNELS,
+    #endif
+    #else
+    .channels = 2,
+    #endif
+    .rate = 48000,
+    #ifdef RK_NEW_EFFECT_ENABLE
+    .period_size = 768, //480,   // 10ms
+    #else
+    .period_size = 480,   // 10ms
+    #endif
+    .period_count = 4,
+    .format = PCM_FORMAT_S16_LE,
+};
+
+
+
 
 static struct pcm_config pcm_config_in_low_latency = {
     .channels = 2,
@@ -737,6 +763,37 @@ struct dev_proc_info BT_IN_NAME[] =
     {"rockchipbt", NULL},
     {NULL, NULL}, /* Note! Must end with NULL, else will cause crash */
 };
+
+
+static void CHeckOpMode()
+{
+    FILE* fd = NULL;
+	char ch;
+
+
+	fd=fopen("/data/misc/AudioHalOp.ini","r");
+	if(fd == NULL) {
+		ALOGD("DEBUG open /data/misc/AudioHalOp.ini ,errno = %s",strerror(errno));
+	} else {
+		ALOGD("OpMode Opened");
+	}
+
+    if (fd != NULL)
+	{
+		ch=fgetc(fd);
+
+		if(ch=='1')
+			gUSE_ASPL =1;
+		else
+			gUSE_ASPL =0;
+		
+    }
+	else
+		gUSE_ASPL =0;
+		
+}
+
+
 
 static int name_match(const char* dst, const char* src)
 {
@@ -1517,7 +1574,7 @@ static void aec_processor_release_ASPL(struct stream_in *in)
         pthread_mutex_lock(&in->aec_handle.effect_lock);
 
         ALOGD("%s: enter", __FUNCTION__);
-        voice_effect_release_ASPL(&in->aec_handle.effect);
+        audio_effect_release_ASPL(&in->aec_handle.effect);
 
         in->aec_handle.quirks = 0;
         in->aec_handle.config = NULL;
@@ -1532,6 +1589,7 @@ static void aec_processor_release_ASPL(struct stream_in *in)
     }
 }
 
+
 static int aec_processor_init_ASPL(struct stream_in *in)
 {
     ALOGD("%s enter\n", __FUNCTION__);
@@ -1545,11 +1603,8 @@ static int aec_processor_init_ASPL(struct stream_in *in)
 
     in->dev->aec_running = true;
 
-    in->aec_handle.config = &pcm_config_in;
-		//in->flags & AUDIO_INPUT_FLAG_FAST ?
-        //                 &pcm_config_in_low_latency_with_ref : &pcm_config_in_with_ref;
-
-    int ret = voice_effect_init_ASPL(&in->aec_handle.effect, in->aec_handle.config->rate,
+    in->aec_handle.config = &pcm_config_in_a;
+    int ret = audio_effect_init_ASPL(in->aec_handle.config->rate,
                                 in->aec_handle.config->channels,
                                 in->aec_handle.config->period_size,
                                 pcm_format_to_bits(in->aec_handle.config->format));
@@ -1564,10 +1619,6 @@ static int aec_processor_init_ASPL(struct stream_in *in)
     if (!in->aec_handle.buffer) {
         in->aec_handle.config = NULL;
 
-        if(in->aec_handle.effect.rk_preprocess)
-        {
-            voice_effect_release_ASPL(&in->aec_handle.effect);
-        }
         ret = -ENOMEM;
         goto clean_aec;
     }
@@ -1584,49 +1635,6 @@ clean_aec:
     return ret;
 }
 
-static int aec_apply_effects_ASPL(struct stream_in *in)
-{
-    size_t frames;
-    size_t copy;
-    int ret;
-	int i;
-	double DoAVal;
-	
-
-    //ALOGD("%s enter, quirk = %#x\n", __FUNCTION__, in->aec_handle.quirks);
-
-    frames = in->aec_handle.config->period_size;
-    copy = pcm_frames_to_bytes(in->pcm, frames);
-
-    /* NOTE: If the recording is mono, we need to turn it to stereo */
-    if (in->aec_handle.config->channels == 2) {
-        size_t samples = copy / 2;
-        if (in->aec_handle.quirks & VOICE_STREAM_CHANNEL_MONO_RIGHT)
-            channel_fixed(in->aec_handle.buffer, samples, CHR_VALID);
-
-        if (in->aec_handle.quirks & VOICE_STREAM_CHANNEL_MONO_LEFT)
-            channel_fixed(in->aec_handle.buffer, samples, CHL_VALID);
-    }
-
-	// Do Data align
-
-
-
-    /*
-     * NOTE: If the stream is outgoing and the recording has reference channel,
-     * we should apply AEC with rockchip audio preprocess to remove echoes.
-     */
-    ret = voice_effect_processASPL(&in->aec_handle.effect, in->aec_handle.buffer, frames);
-    if (ret) {
-        ALOGE("%s: failed to process with effect", __FUNCTION__);
-        return 0;
-    }
-
-    copy >>= 1;
-    memcpy(in->buffer, in->aec_handle.effect.stereo_buffer, copy);
-
-    return copy;
-}
 
 
 #ifdef RK_COMMON_AEC_ENABLE
@@ -1728,7 +1736,6 @@ static int aec_processor_init(struct stream_in *in)
     if(in->dev->aec_running)
     {
         aec_processor_release(in);
-//		aec_processor_release_ASPL(in);
     }
 
     pthread_mutex_lock(&in->aec_handle.effect_lock);
@@ -1757,7 +1764,6 @@ static int aec_processor_init(struct stream_in *in)
         {
             voice_effect_release(&in->aec_handle.effect);
         }
-//		voice_effect_release_ASPL(&in->aec_handle.effect);
 
         ret = -ENOMEM;
         goto clean_aec;
@@ -2059,6 +2065,7 @@ static int get_next_buffer(struct resampler_buffer_provider *buffer_provider,
     }
 
     if (in->frames_in == 0) {
+		
         #ifdef RK_COMMON_AEC_ENABLE
         if(is_aec_running(in->dev))
         {
@@ -2097,7 +2104,6 @@ static int get_next_buffer(struct resampler_buffer_provider *buffer_provider,
             dump_in_rawdata(in->aec_handle.buffer, size);
 
             size = aec_apply_effects(in);
-			//size = aec_apply_effects_ASPL(in);
         }
         else
         #endif
@@ -2162,11 +2168,14 @@ static int get_next_buffer(struct resampler_buffer_provider *buffer_provider,
          * before the resampler.
          */
 
-		size = aec_apply_effects_ASPL(in);
+		if(gUSE_ASPL)
+		{
+			ALOGD("OPMODE = ASPL PREPROCESS");
+			audio_effect_process_ASPL((void *)in->buffer, (void *)in->buffer,in->config->period_size);
+		}	
+		else
+        	audio_effect_process(&in->effects, (void *)in->buffer, (void *)in->buffer,in->config->period_size);
 
-//        audio_effect_process(&in->effects, (void *)in->buffer, (void *)in->buffer,
-//                             in->config->period_size);
-		
         dump_in_comm_effectdata(buffer->i16, (buffer->frame_count*audio_channel_count_from_in_mask(in->channel_mask))<<1);
         #endif
 
@@ -2272,7 +2281,7 @@ static int get_next_buffer_ASPL(struct resampler_buffer_provider *buffer_provide
             channel_fixed((void*)in->buffer, size / 2, in->channel_flag & ~CH_CHECK);
         }
 		
-		size = aec_apply_effects(in);
+		size = aec_apply_effects_ASPL(in);
 		dump_in_comm_effectdata(buffer->i16, (buffer->frame_count*audio_channel_count_from_in_mask(in->channel_mask))<<1);
 
 		
@@ -2420,6 +2429,7 @@ int create_resampler_helper(struct stream_in *in, uint32_t in_rate)
 }
 
 #ifdef RK_NEW_EFFECT_ENABLE
+
 static void config_input_effects(struct stream_in *in)
 {
     effect_config_t config;
@@ -2516,7 +2526,10 @@ static int start_input_stream(struct stream_in *in)
     } else {
         ALOGD("open build mic");
 		// ASPL 
-        in->config = &pcm_config_in;
+		if(gUSE_ASPL) 
+	        in->config = &pcm_config_in_a;
+		else
+			in->config = &pcm_config_in;
         card = adev->dev_in[SND_IN_SOUND_CARD_MIC].card;
         device =  adev->dev_in[SND_IN_SOUND_CARD_MIC].device;
 
@@ -2524,10 +2537,8 @@ static int start_input_stream(struct stream_in *in)
             route_pcm_card_open(card, getRouteFromDevice(in->device | AUDIO_DEVICE_BIT_IN));
 
             #ifdef RK_COMMON_AEC_ENABLE
-//            if(is_aec_device(in, card, device) && is_aec_available(in)
-//                && 0 == aec_processor_init(in))
-			
-			if(0 == aec_processor_init_ASPL(in))
+            if(is_aec_device(in, card, device) && is_aec_available(in)
+                && 0 == aec_processor_init(in))
             {
                 in->config = in->aec_handle.config;
 
@@ -2634,7 +2645,18 @@ static int start_input_stream(struct stream_in *in)
      * And we need to set the sampling rate and number of channels before
      * resampling, i.e. Set sampling rate to xhz, number of channels to xch.
      */
-    config_input_effects(in);
+
+	if( gUSE_ASPL)
+	{
+    	ALOGD("%s: ASPL preprocessor INIT ", __func__);
+    	aec_processor_init_ASPL(in);
+	}
+	else
+	{
+	    ALOGD("%s: ASPL preprocessor INIT FAIL ", __func__);
+		config_input_effects(in);
+	}
+	
     #endif
 
     in_dump((const struct audio_stream *)in, 0);
@@ -2708,8 +2730,6 @@ frame_count :
                 frames_rd,
             };
             if (get_next_buffer(&in->buf_provider, &buf))
-//			if (get_next_buffer_ASPL(&in->buf_provider, &buf))
-
                 break;
             if (buf.raw != NULL) {
                 memcpy((char *)buffer +
@@ -3376,6 +3396,10 @@ static void dump_in_data(const void* buffer, size_t bytes)
         }
     }
 }
+
+
+
+
 
 
 static void check_hdmi_reconnect(struct stream_out *out)
@@ -4402,10 +4426,19 @@ static int in_remove_audio_effect(const struct audio_stream *stream,
     struct stream_in *in = (struct stream_in *)stream;
 
     #ifdef RK_NEW_EFFECT_ENABLE
+
+
+	if(gUSE_ASPL)
+	{	
+		aec_processor_release_ASPL(in);
+	}
+	else
+	{
         ALOGD("%s: effect %p", __func__, effect);
         pthread_mutex_lock(&in->lock);
         audio_effect_remove(&in->effects, effect);
         pthread_mutex_unlock(&in->lock);
+	}
     #else
 
         effect_descriptor_t descr;
@@ -5635,6 +5668,9 @@ static int adev_open(const hw_module_t* module, const char* name,
 {
     struct audio_device *adev;
     int ret;
+
+	CHeckOpMode();
+	
 
     ALOGD(AUDIO_HAL_VERSION);
 

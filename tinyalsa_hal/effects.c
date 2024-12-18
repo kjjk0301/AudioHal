@@ -16,6 +16,18 @@
 
 #include <stdlib.h>
 #include "effects.h"
+#include "aspl_nr.h"
+#include "Resample.h"
+
+
+UpdamplerContext DownSampleHandle1;
+UpdamplerContext DownSampleHandle2;
+UpdamplerContext DownSampleHandle3;
+UpdamplerContext DownSampleHandle4;
+
+
+UpdamplerContext UpSampleHandle;
+
 
 int audio_effect_count(struct listnode *effects)
 {
@@ -77,6 +89,7 @@ void audio_effect_remove(struct listnode *effects, effect_handle_t effect)
     }
 }
 
+#if 0
 void audio_effect_process(struct listnode *effects, void *in, void *out, size_t frames)
 {
     struct listnode *node;
@@ -96,6 +109,157 @@ void audio_effect_process(struct listnode *effects, void *in, void *out, size_t 
         }
     }
 }
+#endif
+
+
+short AsplSrcBuf[2][512];
+short AsplRefBuf[2][512];
+short TempResample[768*2];
+
+
+int audio_effect_init_ASPL(unsigned int rate,unsigned int channels, unsigned int frames, unsigned int bits)
+{
+    int ref_channels = 2;
+    int src_channels = channels - 2;
+	int rc;
+    int ret;
+
+	printf("ASPL Resampler INIT");
+
+	// ASPL Algorithm Init
+	//aspl_NR_create(NULL);
+	rc=CreateResampler(&DownSampleHandle1,768*4,LP_PASS_TAPS3,pLowPassFilter3);
+	printf("ASPL Resampler INIT %d",rc);
+	if (rc != 1) {
+		  printf(" Error Creating ASPL Resampler!!");
+		  ret = -EINVAL;
+		  goto err;
+	}
+	
+	rc=CreateResampler(&DownSampleHandle2,768*4,LP_PASS_TAPS3,pLowPassFilter3);
+	if (rc != 1) {
+		  printf(" Error Creating ASPL Resampler!!");
+		  ret = -EINVAL;
+		  goto err;
+	}
+	rc=CreateResampler(&DownSampleHandle3,768*4,LP_PASS_TAPS3,pLowPassFilter3);
+	if (rc != 1) {
+		  printf(" Error Creating ASPL Resampler!!");
+		  ret = -EINVAL;
+		  goto err;
+	}
+	rc=CreateResampler(&DownSampleHandle4,768*4,LP_PASS_TAPS3,pLowPassFilter3);
+	if (rc != 1) {
+		  printf(" Error Creating ASPL Resampler!!");
+		  ret = -EINVAL;
+		  goto err;
+	}
+	rc=CreateResampler(&UpSampleHandle,768*4,LP_PASS_TAPS3,pLowPassFilter3);
+		if (rc != 1) {
+			  printf(" Error Creating ASPL Resampler!!");
+			  ret = -EINVAL;
+			  goto err;
+		}
+
+
+	aspl_NR_create_2mic(NULL);
+
+
+
+//	effect->channels = channels;
+	
+		return 0;
+	
+	DestroyResampler(&DownSampleHandle1);
+	DestroyResampler(&DownSampleHandle2);
+	DestroyResampler(&DownSampleHandle3);
+	DestroyResampler(&DownSampleHandle4);
+	DestroyResampler(&UpSampleHandle);
+	aspl_NR_destroy();
+err:
+    return ret;
+}
+
+void audio_effect_release_ASPL()
+{
+	
+	DestroyResampler(&DownSampleHandle1);
+	DestroyResampler(&DownSampleHandle2);
+	DestroyResampler(&DownSampleHandle3);
+	DestroyResampler(&DownSampleHandle4);
+	DestroyResampler(&UpSampleHandle);
+	aspl_NR_destroy();
+
+}
+void audio_effect_process_ASPL(void *in, void *out, size_t frames)
+{
+    struct listnode *node;
+    struct effect_list *entry;
+	int i;
+	short * pData;
+	double DoAVal=0.0;
+
+	pData = (short *) in;
+
+	printf("ASPL effext Process %d",frames);
+	for(i=0;i<frames;i++)
+		TempResample[i]=pData[4*i+0];
+
+	// DownSample
+	DoDnsample(&DownSampleHandle1,TempResample,&(AsplSrcBuf[0][0]),frames,3,1.0);
+		
+	for(i=0;i<frames;i++)
+		TempResample[i]=pData[4*i+1];
+	// DownSample
+	DoDnsample(&DownSampleHandle2,TempResample,&AsplSrcBuf[1][0],frames,3,1.0);
+
+
+	for(i=0;i<frames;i++)
+		TempResample[i]=pData[4*i+2];
+	// DownSample
+	DoDnsample(&DownSampleHandle3,TempResample,&AsplRefBuf[0][0],768*2,3,1.0);
+
+	for(i=0;i<frames;i++)
+		TempResample[i]=pData[4*i+3];
+	// DownSample
+	DoDnsample(&DownSampleHandle4,TempResample,&AsplRefBuf[1][0],768*2,3,1.0);
+		
+	aspl_AEC_process_single(&AsplSrcBuf[0][0],&AsplRefBuf[0][0],512,1050,-10.0);	
+	aspl_NR_process_2mic(&AsplSrcBuf[0][0],512,1,1,&DoAVal);
+
+	
+
+
+//	pData = (short *) out;
+//	DoUpsample(&UpSampleHandle,&(AsplSrcBuf[0][0]),pData,512,3,1.0);
+	
+
+
+
+	
+}
+
+
+void audio_effect_process(struct listnode *effects, void *in, void *out, size_t frames)
+{
+    struct listnode *node;
+    struct effect_list *entry;
+	audio_buffer_t input;
+    audio_buffer_t output;
+
+    list_for_each(node, effects) {
+        entry = node_to_item(node, struct effect_list, list);
+        if ((*entry->handle)->process) {
+            input.frameCount = frames;
+            input.raw = in;
+            output.frameCount = frames;
+            output.raw = out;
+
+            (*entry->handle)->process(entry->handle, &input, &output);
+        }
+    }
+}
+
 
 void audio_effect_process_reverse(struct listnode *effects, void *in, void *out, size_t frames)
 {

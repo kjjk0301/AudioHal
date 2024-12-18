@@ -57,15 +57,6 @@ struct voice_effect_aspl {
 
 int voice_effect_init(struct voice_effect *effect, unsigned int rate,
                       unsigned int channels, unsigned int frames, unsigned int bits);
-
-int voice_effect_init_ASPL(struct voice_effect *effect, unsigned int rate,
-                      unsigned int channels, unsigned int frames, unsigned int bits);
-
 int voice_effect_process(struct voice_effect *effect, void *src, size_t frames);
-int voice_effect_processASPL(struct voice_effect *effect, void *src, size_t frames);
-
 void voice_effect_release(struct voice_effect *effect);
-void voice_effect_release_ASPL(struct voice_effect *effect);
-
-
 #endif
