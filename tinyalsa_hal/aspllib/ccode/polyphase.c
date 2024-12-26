@@ -6,18 +6,20 @@
  */
 #include <string.h>
 #include <stdio.h>
-//#include "sys.h"
-#include "polyphase.h"
-#include "polyphase_win.h"
+#include <stdint.h>
 #include <stdint.h>
 #include <math.h>
+
+#include "sys.h"
+#include "polyphase.h"
+#include "polyphase_win.h"
 
 #include "pffft.h"
 #define MAX_OF(x,y) ((x)>(y)?(x):(y))
 
 // #include "fftw3.h"
 
-#include "aspl_nr.h"
+#include "../../include/aspl_nr.h"
 
 #pragma DATA_ALIGN(fft_xin, 8)
 int32_t fft_xin[PolyM*2];

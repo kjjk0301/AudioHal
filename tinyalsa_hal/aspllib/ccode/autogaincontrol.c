@@ -134,8 +134,8 @@ void AGC_Init(agcInst_t *agcInst){
 		x_peak_band[i] = 0;
 	}
 
-	inst->globalMakeupGain_dB = 15.0;
-	inst->threshold_dBFS = -18.0;
+	inst->globalMakeupGain_dB = 5.0;
+	inst->threshold_dBFS = -8.0;
 
 // #ifdef DEBUG_AGC_MATLAB
 // 	debug_matlab_open();
@@ -166,7 +166,7 @@ void AGC_total_w_ref(agcInst_t *agcInst, void *in, void *ref, void *out, short v
 	short *xref = (short *)ref;
 	short *xout = (short *)out;
 
-	short vad_short = vad & 0x0001;
+	short vad_short = vad && 0x0001;
 
 	int abs_x_Q15, abs_xref_Q15, abs_xout_Q15, beta_s, roundbit_s, beta_f, roundbit_f,  beta_p, roundbit_p;
 	
@@ -177,7 +177,7 @@ void AGC_total_w_ref(agcInst_t *agcInst, void *in, void *ref, void *out, short v
 		
     for (m = 0 ; m<polyblocksize ; m++) {
 
-		if (m>=(polyblocksize>>1)) vad_short = (vad & 0x0010)>>1;
+		if (m>=(polyblocksize>>1)) vad_short = (vad && 0x0010)>>1;
 
 		abs_x_Q15=((int)(abs(xin[m])))<<15;
 
@@ -587,7 +587,7 @@ void AGC_input_5ch_2(agcInst_t *agcInst, int leng, void *in1, void *in2, void *i
         xout4[m] = (short)((float)xin4[m] * temp_gain);
         xout5[m] = (short)((float)xin5[m] * temp_gain);
 
-        abs_xout_Q15 = ((int)(fabs(xout[m]))) << 15;
+        abs_xout_Q15 = ((int)(abs(xout[m]))) << 15;
 
         if (abs_xout_Q15 > xout_fast) {            
             beta_f = inst->beta_f_r;
@@ -635,6 +635,134 @@ void AGC_input_5ch_2(agcInst_t *agcInst, int leng, void *in1, void *in2, void *i
 	// }		
 }
 
+
+void AGC_input_2ch(agcInst_t *agcInst, int leng, void *in1, void *in2, void *out, void *out2, float globalMakeupGain_dB, float threshold_dBFS) {
+
+    int m;
+    float gmod, temp_gain;
+
+    agcInst_t *inst = (agcInst_t *)agcInst;
+
+    float xdB;
+    int abs_x1_Q15, abs_x2_Q15, abs_x3_Q15, abs_x4_Q15, abs_x5_Q15;
+    int max_x1_Q15, max_x2_Q15, max_x3_Q15, max_x4_Q15, max_x5_Q15;	
+    int abs_x_Q15, abs_xout_Q15, beta_f, roundbit_f, beta_p, roundbit_p;
+
+    short *xin = (short *)in1;
+    short *xin2 = (short *)in2;
+
+    short *xout = (short *)out;
+    short *xout2 = (short *)out2;
+
+
+    float gs = 20.0*log10f((float)inputgain);
+    float r_a = gamma16k[1];  // Attack time constant
+    float r_r = gamma16k[7]; // Release time constant
+
+	float threshold_dB = Q30_dB + threshold_dBFS;
+    float softClipStart = threshold_dB - 3.0f; // 쓰레숄드 3dB 전부터 소프트 클리핑 시작
+
+    max_x1_Q15 = 0;
+    max_x2_Q15 = 0;
+
+    for (m = 0 ; m < leng ; m++) {
+        // 각 채널의 절대값 최대값을 계산
+        abs_x1_Q15 = ((int)(abs(xin[m]))) << 15;
+        abs_x2_Q15 = ((int)(abs(xin2[m]))) << 15;
+
+        if (abs_x1_Q15 > max_x1_Q15) max_x1_Q15 = abs_x1_Q15;
+        if (abs_x2_Q15 > max_x2_Q15) max_x2_Q15 = abs_x2_Q15;
+    }
+
+    // 5개의 채널 최대값을 평균하여 x_fast 계산
+    x_fast = (max_x1_Q15 + max_x2_Q15 ) / 2;
+
+
+    for (m = 0 ; m < leng ; m++) {
+
+        if (x_fast > x_peak) {        
+            x_peak = x_fast;
+        } else {
+            beta_p = beta16k[7];
+            roundbit_p = round_bit16k[7];        
+            x_peak = x_peak - ((x_peak + roundbit_p) >> beta_p);
+            x_peak = x_peak + ((x_fast + roundbit_p) >> beta_p);                
+        }           
+
+        xdB = 20.0f * log10f((float)x_peak);
+
+        if (xdB > threshold_dB) {                
+            gc = threshold_dB - xdB + globalMakeupGain_dB; 
+        } else if (xdB > softClipStart) {
+            // 서서히 게인을 줄이는 부분
+            float delta = (threshold_dB - xdB) / 3.0f;
+            gc = delta + globalMakeupGain_dB; 
+        } else {
+            gc = globalMakeupGain_dB;
+        }
+
+        gc = MIN(gc, globalMakeupGain_dB);
+        gc = MAX(gc, -100);
+
+        if (gc < gs) {
+            gs = r_a * gs + (1.0 - r_a) * gc;
+        } else {
+            gs = r_r * gs + (1.0 - r_r) * gc;
+        }
+
+        inputgain = powf(10, gs * 0.05f);
+
+        temp_gain = inputgain;
+        xout[m] = (short)((float)xin[m] * temp_gain);
+        xout2[m] = (short)((float)xin2[m] * temp_gain);
+
+        abs_xout_Q15 = ((int)(abs(xout[m]))) << 15;
+
+        if (abs_xout_Q15 > xout_fast) {            
+            beta_f = inst->beta_f_r;
+            roundbit_f = inst->round_bit_f_r;
+        } else {
+            beta_f = inst->beta_f_f;
+            roundbit_f = inst->round_bit_f_f;
+        }
+        xout_fast = xout_fast - ((xout_fast + roundbit_f) >> beta_f);
+        xout_fast = xout_fast + ((abs_xout_Q15 + roundbit_f) >> beta_f);
+
+#ifdef DEBUG_AGC_MATLAB
+        if ((g_agc_debug_on == 1) && (g_agc_debug_snd_idx == 0)){            
+            idx--;
+            if (idx <= 0){
+                debug_matlab_int(DEBUG_NUM_AGC, x_fast, 0);
+                debug_matlab_int(DEBUG_NUM_AGC, x_peak, 1);
+                
+                debug_matlab_float(DEBUG_NUM_AGC, threshold_dB, 2);
+                debug_matlab_float(DEBUG_NUM_AGC, gc, 3);
+                debug_matlab_float(DEBUG_NUM_AGC, gs, 4);
+
+                debug_matlab_int(DEBUG_NUM_AGC, xout_fast, 7);
+
+                debug_matlab_send(DEBUG_NUM_AGC);
+                idx = 32;
+            }
+        }
+
+        if (g_agc_debug_on == 1){
+            g_agc_debug_snd_idx++;
+            if (g_agc_debug_snd_idx >= g_agc_debug_snd_period) {
+                g_agc_debug_snd_idx = 0;
+            }
+        }
+
+#endif
+
+    }
+
+	// idx--;
+	// if (idx<=0){
+	// 	printf("AGC : x_peak = %d, inst->Kp_dB = %3.1f, xdB = %3.1f, gc=%.2f, gs=%.2f gain=%.2f\n", x_peak, threshold_dB-180, xdB-180, gc, gs, inputgain);
+	// 	idx=20;
+	// }		
+}
 
 void AGC_band(agcInst_t *agcInst, void *fft_in_mat, void *fft_out_mat) {
 

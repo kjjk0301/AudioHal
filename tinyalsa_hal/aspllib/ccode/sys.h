@@ -1,6 +1,8 @@
 #ifndef _SYS_H
 #define _SYS_H
 
+#include "../include/aspl_nr.h"
+
 typedef signed char  int8_t;  
 typedef signed short int16_t;  
 typedef signed int   int32_t;  
@@ -165,6 +167,48 @@ typedef struct Total_Inst_s {
     int slope_NR3;       // 51
     int high_att_NR3;    // 52
     int target_SPL_NR3;  // 53
+
+
+// from Global variables 
+    aspl_NR_CONFIG g_nr_config;
+    // aspl_nr_params_t g_aspl_nr_params;
+
+    int total_idx; // = 0;
+
+    // int16_t* g_codec_buf=NULL;
+    int16_t* g_codec_4mic_buf[MULTI_INPUT_CHANNELS+REF_CHANNELS]; //={NULL, NULL, NULL, NULL, NULL, NULL};
+    int16_t* g_data_vad; //=NULL;
+    char * g_WorkBuf; //=NULL;
+
+    int32_t * fft_in_mat[MicN]; //[PolyM*PolyL*2];
+    int32_t * fft_ref_mat[RefN]; //[PolyM*PolyL*2];
+    int32_t * fft_out_mat[BeamN]; //[PolyM*PolyL*2];
+    int32_t * fft_ns_buf_mat; //[PolyM*(PolyL+Ma_size_max-1)];
+    int32_t * fft_bf_mat[BeamN]; //[PolyM*PolyL*2];
+    int32_t * fft_bf_rear_mat[BeamN]; //[PolyM*PolyL*2];
+
+    short	  vad_pre[8];
+    short	  vad_min[8];
+    short	  vad_max[8];
+
+    int count_pre; //=0;
+    int count_post; //=0;
+
+    float fade_gs; // = -30.0;
+    float fade_gc; // = 0.0;
+    float r_a; // = 0.7;
+
+    int offset_Q15_L; //=0,
+    int offset_Q15_R; //=0;
+    int offset_Q15_multi[6]; //={0, 0, 0, 0, 0, 0};
+    int sample_left; // = 0;
+
+    double DoA_mean; //=0.0;
+    int g_Beamno; //=0;
+    double g_DoA; //=-1.0;
+    int no_DoA_cnt; //=0;
+
+// from Global variables   
 
 } Total_Inst_t;
 

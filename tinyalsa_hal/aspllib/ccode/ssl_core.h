@@ -39,8 +39,8 @@ void ssl_core_Init(sslInst_t *sslInst);
 void ssl_core_Init_wall(sslInst_t *sslInst);
 void ssl_core_DeInit();
 void ssl_core_process(sslInst_t *sslInst, short *in_L, short *in_R, short *in_F, short *in_B, short ssl_vad, short ssl_vad_long, double *DoA_mean_p);
-void ssl_core_process_gun(sslInst_t *sslInst, short *in_L, short *in_R, short *in_F, short *in_B, double *DoA_mean_p, int mode );
-void ssl_core_process_linear(sslInst_t *sslInst, short *in_L, short *in_R, short *in_C, double *DoA_mean_p);
+void ssl_core_process_4ch(sslInst_t *sslInst, short *in_L, short *in_R, short *in_F, short *in_B, double *DoA_mean_p, int mode );
+void ssl_core_process_2ch(sslInst_t *sslInst, short *in_L, short *in_R, double *DoA_mean_p, int mode, short ext_vad);
 
 extern sslInst_t Sys_sslInst;
 

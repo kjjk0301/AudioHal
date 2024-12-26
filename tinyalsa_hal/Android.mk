@@ -37,13 +37,14 @@ commonSrcFiles := \
    aspllib/ccode/audio_utils.c \
    aspllib/ccode/autogaincontrol.c \
    aspllib/ccode/beamforming.c \
+   aspllib/ccode/cng.c \
    aspllib/ccode/dB_scale.c \
+   aspllib/ccode/debug_file.c \
    aspllib/ccode/echo_canceller.c \
    aspllib/ccode/level_mon.c \
    aspllib/ccode/noise_supression.c \
    aspllib/ccode/pffft.c \
    aspllib/ccode/polyphase.c \
-   aspllib/ccode/debug_file_aspl.c \
    aspllib/ccode/ssl_core.c	\
    aspllib/ccode/ssl_vad.c \
    aspllib/ccode/time_constant.c

@@ -99,7 +99,7 @@ void de_AGC_band(agcInst_t *agcInst, void *fft_in_mat, void *fft_out_mat);
 void AGC_total_w_ref(agcInst_t *agcInst, void *in, void *ref, void *out, short vad, short vad_long);
 void AGC_input_5ch(agcInst_t *agcInst, int leng, short *pvad, short *pvad_long, void *in1, void *in2, void *in3, void *in4, void *in5, void *out, void *out2, void *out3, void *out4, void *out5);
 void AGC_input_5ch_2(agcInst_t *agcInst, int leng, void *in1, void *in2, void *in3, void *in4, void *in5, void *out, void *out2, void *out3, void *out4, void *out5, float globalMakeupGain_dB, float threshold_dBFS);
-
+void AGC_input_2ch(agcInst_t *agcInst, int leng, void *in1, void *in2, void *out, void *out2, float globalMakeupGain_dB, float threshold_dBFS) ;
 
 
 

@@ -70,7 +70,7 @@ int debug_matlab_ccv_send(int ccv_num, int ccv_leng);
 int debug_matlab_doa_send(int num, double DoA);
 int debug_matlab_ssl_vad_send(int32_t vad);
 int debug_matlab_ssl_float_send(int num, float val);
-int debug_matlab_audio (short* audiobuffer, short len);
+void debug_matlab_audio (short* audiobuffer, short len);
 int debug_matlab_float_array_send(int type, float* val, int num);
 int debug_matlab_int_array_send(int type, int32_t* val, int num);
 
@@ -81,6 +81,7 @@ typedef struct {
     float val3;
     float val4;
     float val5;
+    float val6;
 } FloatPacket;
 
 int debug_matlab_ssl_float_packet_send(int num, FloatPacket packet);

@@ -18,6 +18,9 @@
   ******************************************************************************
   */ 
 
+#ifndef _ASPL_NR_H
+#define _ASPL_NR_H
+
 #define aspl_RET_SUCCESS 0
 #define aspl_RET_FAIL    1
 #define aspl_RET_FAIL_MALLOC    2
@@ -46,6 +49,20 @@ typedef struct aspl_NR_CONFIG_
   int noise_level;
   int target_level;
   int SNR_current;
+
+  void * Total_Inst_p;
+  void * aecInst_p[4];
+
+  int aec_Mic_N;
+  int offset_Q15_L;
+  int offset_Q15_R;
+  int offset_Q15_ref;
+
+  float AEC_filter_save[2][2000];
+  int AEC_filter_len[2];
+  int AEC_globaldelay[2]; // for 1024 buffer
+  int AEC_filter_updated;
+  int AEC_filter_loaded;  
 
 } aspl_NR_CONFIG;
 
@@ -158,10 +175,23 @@ int aspl_NR_process_enables(short* data, int len, int NS_enable, int AGC_enable,
 int aspl_NR_destroy(void); // NR 제거 함수
 int aspl_NR_set(aspl_NR_CMD_E cmd, void* data); // NR단계 적용 함수
 
+void aspl_NR_expert_param_read(aspl_nr_params_t* tmp_p);
+void aspl_NR_expert_param_write(aspl_nr_params_t* tmp_p);
+int aspl_NR_param_set(int param_num, int value); // expert mode, NR 파라메터 변경
+int aspl_NR_param_get(int param_num); // expert mode, NR 파라메터 읽기
+int aspl_NR_total_param_set_from_file(const char* file_path); // expert mode, 튜닝 파라메터 바이너리 파일로 부터 파라메터 전체 업데이트
+int aspl_NR_total_param_write_to_file(const char* file_path); // expert mode, 전체 튜닝 파라메터를 바이너리 파일로 기록 
+
 int aspl_NR_create_2mic(void* data); // 2mic NR 초기화 함수
 int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double * pDoA); // 2mic NR 수행 함수, with Beamforming auto mode : 1 auto, 0 manual
 
-int aspl_AEC_process_single(int16_t* data, int16_t* ref, int len, int aec_delay, float micscaledB);
+int aspl_AEC_create(aspl_NR_CONFIG* config);
+int aspl_AEC_process_2ch(int16_t* data, int16_t* ref, int len, int aec_delay, float micscaledB, aspl_NR_CONFIG* config);
+int aspl_AEC_process_single(int16_t* data, int16_t* ref, int len, int aec_delay, float micscaledB, aspl_NR_CONFIG* config);
+int aspl_AEC_process_filtersave(int16_t* data, int16_t* ref, int len, int aec_delay, int delayauto, float micscaledB, aspl_NR_CONFIG* config);
+int aspl_AEC_filterload(aspl_NR_CONFIG* config);
 
 void aspl_print_ver();
 const char* aspl_getVersionInfo();
+
+#endif
