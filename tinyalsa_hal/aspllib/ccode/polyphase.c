@@ -19,7 +19,7 @@
 
 // #include "fftw3.h"
 
-#include "../../include/aspl_nr.h"
+#include "aspl_nr.h"
 
 #pragma DATA_ALIGN(fft_xin, 8)
 int32_t fft_xin[PolyM*2];

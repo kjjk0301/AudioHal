@@ -117,6 +117,9 @@ short AsplRefBuf[2][512];
 short TempResample[768*2];
 
 
+aspl_NR_CONFIG aspl_nr_config;
+
+	
 int audio_effect_init_ASPL(unsigned int rate,unsigned int channels, unsigned int frames, unsigned int bits)
 {
     int ref_channels = 2;
@@ -161,8 +164,22 @@ int audio_effect_init_ASPL(unsigned int rate,unsigned int channels, unsigned int
 			  goto err;
 		}
 
+	//aspl_NR_create_2mic
+	aspl_nr_config.aec_Mic_N = 2;
+	aspl_NR_create_2mic(&aspl_nr_config);
 
-	aspl_NR_create_2mic(NULL);
+	aspl_nr_config.enable = 1;
+ 	aspl_nr_config.sensitivity = 2;
+	char* file_path = "//aspl_nr_params_default.bin";
+	strncpy(aspl_nr_config.tuning_file_path, file_path, sizeof(aspl_nr_config.tuning_file_path));
+ 	aspl_nr_config.tuning_file_path[sizeof(aspl_nr_config.tuning_file_path) - 1] = '\0';  // Ensure null termination	 
+
+ // int ret = aspl_NR_create(NULL);
+	ret = aspl_NR_create_2mic((void *)&aspl_nr_config);
+ 
+	aspl_nr_config.aec_Mic_N = 2;
+	ret = aspl_AEC_create(&aspl_nr_config);
+
 
 
 
@@ -224,7 +241,8 @@ void audio_effect_process_ASPL(void *in, void *out, size_t frames)
 	// DownSample
 	DoDnsample(&DownSampleHandle4,TempResample,&AsplRefBuf[1][0],768*2,3,1.0);
 		
-	aspl_AEC_process_single(&AsplSrcBuf[0][0],&AsplRefBuf[0][0],512,1050,-10.0);	
+//	aspl_AEC_process_single(&AsplSrcBuf[0][0],&AsplRefBuf[0][0],512,1050,-10.0);	
+	aspl_AEC_process_2ch(&AsplSrcBuf[0][0],&AsplRefBuf[0][0],512,aspl_nr_config.AEC_globaldelay[0],0.0,&aspl_nr_config);
 	aspl_NR_process_2mic(&AsplSrcBuf[0][0],512,1,1,&DoAVal);
 
 	
