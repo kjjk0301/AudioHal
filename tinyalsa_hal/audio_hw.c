@@ -786,7 +786,6 @@ static void CHeckOpMode()
 			gUSE_ASPL =1;
 		else
 			gUSE_ASPL =0;
-		
     }
 	else
 		gUSE_ASPL =0;
@@ -5670,8 +5669,6 @@ static int adev_open(const hw_module_t* module, const char* name,
     int ret;
 
 	CHeckOpMode();
-	
-
     ALOGD(AUDIO_HAL_VERSION);
 
     if (strcmp(name, AUDIO_HARDWARE_INTERFACE) != 0)
