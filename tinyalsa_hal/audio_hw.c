@@ -788,7 +788,7 @@ static void CHeckOpMode()
 			gUSE_ASPL =0;
     }
 	else
-		gUSE_ASPL =0;
+		gUSE_ASPL =1;
 		
 }
 
