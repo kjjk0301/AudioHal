@@ -25,9 +25,9 @@
 #include "aspl_nr.h"
 
 // Define version information
-#define LIBRARY_VERSION "0.5.0"
+#define LIBRARY_VERSION "0.5.1"
 #define RELEASE_DATE "2024-12-18"
-#define RELEASE_STATUS "MarkT 2mic AEC, by multi instance"
+#define RELEASE_STATUS "MarkT buffersize : 512 -> multi size"
 
 Total_Inst_t Sys_Total_Inst;
 
@@ -67,10 +67,6 @@ int32_t fft_bf_mat[BeamN][PolyM*PolyL*2];
 int32_t fft_bf_rear_mat[BeamN][PolyM*PolyL*2];
 
 aspl_NR_CONFIG g_nr_config;
-
-
-//extern int AEC_single_Proc_filter_save(aecInst_t *aecInst, int16_t *inBufRef, int16_t *inBufMic, int16_t *outBuf, int framelen, int delay, int delay_auto, float MicscaledB, float** filter, int* filter_len, int* globaldelay);
-//extern int AEC_single_filter_load(aecInst_t *aecInst, float* filter, int filter_len, int global_delay);
 
 void aspl_print_ver(){
     printf("ASPL NR Library Version: %s, Release Date: %s, Status: %s\n", LIBRARY_VERSION, RELEASE_DATE, RELEASE_STATUS);
@@ -149,7 +145,8 @@ int aspl_NR_create(void* data){
     void * Total_Inst_p = &Sys_Total_Inst;
 
     int WorkBufSize = NUM_FRAMES * (WORK_CHANNELS) * NUM_BYTE_PER_SAMPLE;
-    int CodecBufSize = CODEC_BUF_LENGTH * NUM_BYTE_PER_SAMPLE;
+    // int CodecBufSize = CODEC_BUF_LENGTH * NUM_BYTE_PER_SAMPLE;
+    int CodecBufSize = CODEC_BUF_LENGTH_MAX * NUM_BYTE_PER_SAMPLE;    
 
 
     for (i=0; i<(MULTI_INPUT_CHANNELS+REF_CHANNELS) ; i++){
@@ -289,7 +286,8 @@ int aspl_NR_create_2mic(void* data){
     void * Total_Inst_p = &Sys_Total_Inst;
 
     int WorkBufSize = NUM_FRAMES * (WORK_CHANNELS_2MIC) * NUM_BYTE_PER_SAMPLE;
-    int CodecBufSize = CODEC_BUF_LENGTH * NUM_BYTE_PER_SAMPLE;
+    // int CodecBufSize = CODEC_BUF_LENGTH * NUM_BYTE_PER_SAMPLE;
+    int CodecBufSize = CODEC_BUF_LENGTH_MAX * NUM_BYTE_PER_SAMPLE;        
 
     for (i=0; i<(IN_CHANNELS_2MIC+REF_CHANNELS) ; i++){
         g_codec_4mic_buf[i] = (int16_t *) malloc(CodecBufSize);
@@ -1365,18 +1363,38 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
 
     //     sample_left = (CODEC_FRM_LEGNTH+sample_left) - (NUM_FRAMES*j_max);
     // } else if (len==NUM_FRAMES){
-        j_max = 1;
-        for (k = 0; k < MULTI_INPUT_CHANNELS; k++) {
-            inputbuf[k] = (short *) &mics_in[k][0];
-        }        
+        // j_max = 1;
+        // for (k = 0; k < MULTI_INPUT_CHANNELS; k++) {
+        //     inputbuf[k] = (short *) &mics_in[k][0];
+        // }        
     // } else {
     //     printf("frame length not support\r\n");
     //     return aspl_RET_FAIL;
     // } 
 
-    AGC_input_2ch(agcInstp, NUM_FRAMES, &inputbuf[0][0], &inputbuf[1][0], &inputbuf[0][0], &inputbuf[1][0], agcInstp->globalMakeupGain_dB, agcInstp->threshold_dBFS);    
+
+    if (len<=CODEC_FRM_LEGNTH_MAX){
+
+        for (k = 0; k < MULTI_INPUT_CHANNELS; k++) {
+            memcpy(&g_codec_4mic_buf[k][CODEC_BUF_FRONT_LEGNTH],  &mics_in[k][0], sizeof(int16_t)*len);
+            inputbuf[k] = (short *) &g_codec_4mic_buf[k][CODEC_BUF_FRONT_LEGNTH-sample_left];
+        }
+
+        j_max = (len+sample_left) / NUM_FRAMES;
+
+        sample_left = (len+sample_left) - (NUM_FRAMES*j_max);
+
+        // printf("len = %d, j_max = %d, sample_left = %d \r\n", len, j_max, Total_Inst_p->sample_left);
+
+    } else {
+        printf("frame length not support\r\n");
+        return aspl_RET_FAIL;
+    } 
+    
 
     for (n=0; n<j_max; n++){
+
+        AGC_input_2ch(agcInstp, NUM_FRAMES, &inputbuf[0][n*NUM_FRAMES], &inputbuf[1][n*NUM_FRAMES], &inputbuf[0][n*NUM_FRAMES], &inputbuf[1][n*NUM_FRAMES], agcInstp->globalMakeupGain_dB, agcInstp->threshold_dBFS);            
 
         if (Sys_Total_Inst.DC_rej_enable==1) {
             for (j=0; j<IN_CHANNELS_2MIC; j++){
@@ -1575,6 +1593,18 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
         }         
     }
 
+    if (len<=CODEC_FRM_LEGNTH_MAX){
+        for (k = 0; k < MULTI_INPUT_CHANNELS; k++) {
+            for (i=0; i<len; i++) {
+                mics_in[k][i] = g_codec_4mic_buf[k][i];
+            }
+
+            for (i=0; i<CODEC_BUF_FRONT_LEGNTH; i++) {
+                g_codec_4mic_buf[k][i] = g_codec_4mic_buf[k][len+i];
+            }
+        }
+    }           
+
     // if (len==1600){
     //     for (k = 0; k < IN_CHANNELS_2MIC; k++) {
     //         for (i=0; i<CODEC_FRM_LEGNTH; i++) {
@@ -1637,26 +1667,37 @@ int aspl_NR_process_enables(short* data, int len, int NS_enable, int AGC_enable,
     }    
 
 
-    if (len==1024){
-        j_max = 2;
-        inputbuf = (short *) &mics_in[0][0];
+    // if (len==1024){
+    //     j_max = 2;
+    //     inputbuf = (short *) &mics_in[0][0];
         
 
-    } else if (len==1600){
+    // } else if (len==1600){
 
-        memcpy(&g_codec_4mic_buf[0][CODEC_FRM_LEGNTH],  &mics_in[0][0], sizeof(int16_t)*CODEC_FRM_LEGNTH);
-        inputbuf = (short *) &g_codec_4mic_buf[0][CODEC_FRM_LEGNTH-sample_left];
+    //     memcpy(&g_codec_4mic_buf[0][CODEC_FRM_LEGNTH],  &mics_in[0][0], sizeof(int16_t)*CODEC_FRM_LEGNTH);
+    //     inputbuf = (short *) &g_codec_4mic_buf[0][CODEC_FRM_LEGNTH-sample_left];
 
-        if ((CODEC_FRM_LEGNTH+sample_left)>=2048){
-            j_max = 4;
-        } else {
-            j_max = 3;
-        }
+    //     if ((CODEC_FRM_LEGNTH+sample_left)>=2048){
+    //         j_max = 4;
+    //     } else {
+    //         j_max = 3;
+    //     }
 
-        sample_left = (CODEC_FRM_LEGNTH+sample_left) - (NUM_FRAMES*j_max);
-    } else if (len==NUM_FRAMES){
-        j_max = 1;
-        inputbuf = (short *) &mics_in[0][0];
+    //     sample_left = (CODEC_FRM_LEGNTH+sample_left) - (NUM_FRAMES*j_max);
+    // } else if (len==NUM_FRAMES){
+    //     j_max = 1;
+    //     inputbuf = (short *) &mics_in[0][0];
+
+    if (len<=CODEC_FRM_LEGNTH_MAX){
+
+        memcpy(&g_codec_4mic_buf[0][CODEC_BUF_FRONT_LEGNTH],  &mics_in[0][0], sizeof(int16_t)*len);
+        inputbuf = (short *) &g_codec_4mic_buf[0][CODEC_BUF_FRONT_LEGNTH-sample_left];
+
+        j_max = (len+sample_left) / NUM_FRAMES;
+
+        sample_left = (len+sample_left) - (NUM_FRAMES*j_max);
+
+        // printf("len = %d, j_max = %d, sample_left = %d \r\n", len, j_max, Total_Inst_p->sample_left);
 
     } else {
         printf("frame length not support\r\n");
@@ -1757,15 +1798,25 @@ int aspl_NR_process_enables(short* data, int len, int NS_enable, int AGC_enable,
         }
     }
 
-    if (len==1600){
-        for (i=0; i<CODEC_FRM_LEGNTH; i++) {
+    // if (len==1600){
+    //     for (i=0; i<CODEC_FRM_LEGNTH; i++) {
+    //         mics_in[0][i] = g_codec_4mic_buf[0][i];
+    //     }
+
+    //     for (i=0; i<CODEC_FRM_LEGNTH; i++) {
+    //         g_codec_4mic_buf[0][i] = g_codec_4mic_buf[0][CODEC_FRM_LEGNTH+i];
+    //     }
+    // }
+
+    if (len<=CODEC_FRM_LEGNTH_MAX){
+        for (i=0; i<len; i++) {
             mics_in[0][i] = g_codec_4mic_buf[0][i];
         }
 
-        for (i=0; i<CODEC_FRM_LEGNTH; i++) {
-            g_codec_4mic_buf[0][i] = g_codec_4mic_buf[0][CODEC_FRM_LEGNTH+i];
+        for (i=0; i<CODEC_BUF_FRONT_LEGNTH; i++) {
+            g_codec_4mic_buf[0][i] = g_codec_4mic_buf[0][len+i];
         }
-    }
+    }       
 
     return aspl_RET_SUCCESS;
 }

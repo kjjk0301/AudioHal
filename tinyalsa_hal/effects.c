@@ -112,12 +112,25 @@ void audio_effect_process(struct listnode *effects, void *in, void *out, size_t 
 #endif
 
 
-short AsplSrcBuf[2][512];
-short AsplRefBuf[2][512];
-short TempResample[768*2];
-
+short * AsplSrcBuf[2];
+short * AsplRefBuf[2];
+short TempResample[768*4];
+short workbuf[768*4];
 
 aspl_NR_CONFIG aspl_nr_config;
+
+#if 1
+#include <time.h>
+
+#define MAX_FILES 5
+#define SAVE_INTERVAL 10 // seconds
+
+int file_count = 1;
+time_t start_time, current_time;
+char filename[256];
+FILE *file;
+
+#endif 
 
 	
 int audio_effect_init_ASPL(unsigned int rate,unsigned int channels, unsigned int frames, unsigned int bits)
@@ -179,7 +192,16 @@ int audio_effect_init_ASPL(unsigned int rate,unsigned int channels, unsigned int
 	aspl_nr_config.aec_Mic_N = 2;
 	ret = aspl_AEC_create(&aspl_nr_config);
 
-
+//		// 루프 시작 시간 
+//		time(&start_time);
+//		snprintf(filename, sizeof(filename), "/data/misc/audio_data_%d.raw", file_count);
+//	
+//		// 파일 열기			
+//		file = fopen(filename, "wb");			 
+//		if (file == NULL) {
+//			perror("Failed to open file");				  
+//			exit(EXIT_FAILURE);
+//		}
 
 
 //	effect->channels = channels;
@@ -207,42 +229,109 @@ void audio_effect_release_ASPL()
 	aspl_NR_destroy();
 
 }
+
+
+
 void audio_effect_process_ASPL(void *in, void *out, size_t frames)
 {
     struct listnode *node;
     struct effect_list *entry;
 	int i;
 	short * pData;
+	short * pData_out;
 	double DoAVal=0.0;
 
 	pData = (short *) in;
+	pData_out = (short *) out;	
 
-	printf("ASPL effext Process %d",frames);
+
+	AsplSrcBuf[0] = &workbuf[0*(frames/3)];
+	AsplSrcBuf[1] = &workbuf[1*(frames/3)];
+
+//		if (file_count < MAX_FILES) {
+//	
+//			time(&current_time);
+//			if (difftime(current_time, start_time) >= SAVE_INTERVAL) {
+//	            // 파일 닫기            
+//	            fclose(file);
+//				printf("Saved audio data to %s\n", filename);
+//	
+//				file_count++;
+//	
+//				snprintf(filename, sizeof(filename), "/data/misc/audio_data_%d.raw", file_count);	
+//	
+//				// 파일 열기			  
+//				file = fopen(filename, "wb"); 		   
+//				if (file == NULL) {				  
+//					perror("Failed to open file");				
+//					exit(EXIT_FAILURE); 		   
+//				}
+//	
+//			}
+//			
+//	
+//		} else if (file_count >= MAX_FILES) {
+//			time(&current_time);
+//			if (difftime(current_time, start_time) >= SAVE_INTERVAL) {
+//	            // 파일 닫기            
+//	            fclose(file);
+//				printf("Saved audio data to %s\n", filename);
+//	
+//				file_count=1;
+//	
+//				snprintf(filename, sizeof(filename), "/data/misc/audio_data_%d.raw", file_count);	
+//	
+//				// 파일 열기			  
+//				file = fopen(filename, "wb"); 		   
+//				if (file == NULL) {				  
+//					perror("Failed to open file");				
+//					exit(EXIT_FAILURE); 		   
+//				}
+//	
+//			}
+//		}
+//	
+//	
+//		fwrite(pData, sizeof(short), frames * 2, file);
+
+//		pData = (short *) in;
+//	
+//		printf("ASPL effext Process %d",frames);
 	for(i=0;i<frames;i++)
 		TempResample[i]=pData[4*i+0];
-
-	// DownSample
-	DoDnsample(&DownSampleHandle1,TempResample,&(AsplSrcBuf[0][0]),frames,3,1.0);
+	
+	// 1CH DownSample
+	DoDnsample(&DownSampleHandle1,TempResample, &AsplSrcBuf[0][0], frames, 3, 1.0);
 		
 	for(i=0;i<frames;i++)
 		TempResample[i]=pData[4*i+1];
-	// DownSample
-	DoDnsample(&DownSampleHandle2,TempResample,&AsplSrcBuf[1][0],frames,3,1.0);
 
-
+	// 2CH DownSample
+	DoDnsample(&DownSampleHandle2,TempResample, &AsplSrcBuf[1][0], frames, 3, 1.0);
+//	
+//	
 	for(i=0;i<frames;i++)
 		TempResample[i]=pData[4*i+2];
 	// DownSample
-	DoDnsample(&DownSampleHandle3,TempResample,&AsplRefBuf[0][0],768*2,3,1.0);
+	DoDnsample(&DownSampleHandle3,TempResample,&AsplRefBuf[0][0], frames, 3, 1.0);
+//	
+//		for(i=0;i<frames;i++)
+//			TempResample[i]=pData[4*i+3];
+//		// DownSample
+//		DoDnsample(&DownSampleHandle4,TempResample,&AsplRefBuf[1][0],768*2,3,1.0);
+//			
+//	//	aspl_AEC_process_single(&AsplSrcBuf[0][0],&AsplRefBuf[0][0],512,1050,-10.0);	
+//		    aspl_AEC_process_2ch(&AsplSrcBuf[0][0],&AsplRefBuf[0][0],256,aspl_nr_config.AEC_globaldelay[0],0.0,&aspl_nr_config);
+		aspl_NR_process_2mic(&AsplSrcBuf[0][0],256,1,1,&DoAVal);
 
-	for(i=0;i<frames;i++)
-		TempResample[i]=pData[4*i+3];
-	// DownSample
-	DoDnsample(&DownSampleHandle4,TempResample,&AsplRefBuf[1][0],768*2,3,1.0);
-		
-//	aspl_AEC_process_single(&AsplSrcBuf[0][0],&AsplRefBuf[0][0],512,1050,-10.0);	
-	aspl_AEC_process_2ch(&AsplSrcBuf[0][0],&AsplRefBuf[0][0],512,aspl_nr_config.AEC_globaldelay[0],0.0,&aspl_nr_config);
-	aspl_NR_process_2mic(&AsplSrcBuf[0][0],512,1,1,&DoAVal);
+	DoUpsample(&UpSampleHandle, &AsplSrcBuf[0][0], TempResample, 256, 3, 1.0);
+
+
+	for(i=0;i<frames;i++) {
+		pData_out[2*i+0] = TempResample[i];
+		pData_out[2*i+1] = TempResample[i];
+	}
+
 
 }
 

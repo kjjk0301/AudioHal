@@ -105,7 +105,7 @@ static struct pcm_config pcm_config_in_a = {
     #endif
     .rate = 48000,
     #ifdef RK_NEW_EFFECT_ENABLE
-    .period_size = 768*2, //480,   // 10ms
+    .period_size = 768, //480,   // 10ms
     #else
     .period_size = 480,   // 10ms
     #endif
@@ -151,7 +151,7 @@ static struct pcm_config pcm_config_in_low_latency = {
 static struct pcm_config pcm_config_in_with_ref = {
     .channels = 4,
     .rate = 48000,//8000,
-    .period_size = 768*2,//128,   // 10ms
+    .period_size = 768,//128,   // 10ms
     .period_count = 4,
     .format = PCM_FORMAT_S16_LE,
 };
@@ -159,7 +159,7 @@ static struct pcm_config pcm_config_in_with_ref = {
 static struct pcm_config pcm_config_in_low_latency_with_ref = {
     .channels = 4,
     .rate = 48000,//8000,
-    .period_size = 768*2,//128,
+    .period_size = 768,//128,
     .period_count = 4,
     .format = PCM_FORMAT_S16_LE,
 };
@@ -2170,10 +2170,10 @@ static int get_next_buffer(struct resampler_buffer_provider *buffer_provider,
 		if(gUSE_ASPL)
 		{
 			ALOGD("OPMODE = ASPL PREPROCESS");
-			audio_effect_process_ASPL((void *)in->buffer, (void *)in->buffer,in->config->period_size);
+			audio_effect_process_ASPL((void *)in->buffer, (void *)in->buffer, in->config->period_size);
 		}	
 		else
-        	audio_effect_process(&in->effects, (void *)in->buffer, (void *)in->buffer,in->config->period_size);
+        	audio_effect_process(&in->effects, (void *)in->buffer, (void *)in->buffer, in->config->period_size);
 
         dump_in_comm_effectdata(buffer->i16, (buffer->frame_count*audio_channel_count_from_in_mask(in->channel_mask))<<1);
         #endif
