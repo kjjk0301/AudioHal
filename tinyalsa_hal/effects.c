@@ -114,6 +114,9 @@ void audio_effect_process(struct listnode *effects, void *in, void *out, size_t 
 
 short * AsplSrcBuf[2];
 short * AsplRefBuf[2];
+short * AsplSrcBuf_48k[2];
+short * AsplRefBuf_48k[2];
+
 short TempResample[768*4];
 short workbuf[768*4];
 
@@ -192,21 +195,11 @@ int audio_effect_init_ASPL(unsigned int rate,unsigned int channels, unsigned int
 	aspl_nr_config.aec_Mic_N = 2;
 	ret = aspl_AEC_create(&aspl_nr_config);
 
-//		// 루프 시작 시간 
-//		time(&start_time);
-//		snprintf(filename, sizeof(filename), "/data/misc/audio_data_%d.raw", file_count);
-//	
-//		// 파일 열기			
-//		file = fopen(filename, "wb");			 
-//		if (file == NULL) {
-//			perror("Failed to open file");				  
-//			exit(EXIT_FAILURE);
-//		}
-
+	aspl_nr_config.AEC_filter_updated = 0;
 
 //	effect->channels = channels;
 	
-		return 0;
+	return 0;
 	
 	DestroyResampler(&DownSampleHandle1);
 	DestroyResampler(&DownSampleHandle2);
@@ -230,6 +223,8 @@ void audio_effect_release_ASPL()
 
 }
 
+#define PCM_CAPTURE_CHANNELS 2
+#define PCM_REFERENCE_CHANNELS 2
 
 
 void audio_effect_process_ASPL(void *in, void *out, size_t frames)
@@ -237,95 +232,141 @@ void audio_effect_process_ASPL(void *in, void *out, size_t frames)
     struct listnode *node;
     struct effect_list *entry;
 	int i;
+	short *	in_r_16k;
+	short *	in_r_48k;	
 	short * pData;
 	short * pData_out;
+	unsigned char *tempTxPtr, *tempRxPtr, *tempWkPtr;
+
+	
 	double DoAVal=0.0;
 
 	pData = (short *) in;
 	pData_out = (short *) out;	
 
+	short * AsplSrcBuf_48k[2];
+	short * AsplRefBuf_48k[2];
 
-	AsplSrcBuf[0] = &workbuf[0*(frames/3)];
-	AsplSrcBuf[1] = &workbuf[1*(frames/3)];
+	in_r_16k  = (short *)workbuf;
+	in_r_48k  = (short *)TempResample;
 
-//		if (file_count < MAX_FILES) {
-//	
-//			time(&current_time);
-//			if (difftime(current_time, start_time) >= SAVE_INTERVAL) {
-//	            // 파일 닫기            
-//	            fclose(file);
-//				printf("Saved audio data to %s\n", filename);
-//	
-//				file_count++;
-//	
-//				snprintf(filename, sizeof(filename), "/data/misc/audio_data_%d.raw", file_count);	
-//	
-//				// 파일 열기			  
-//				file = fopen(filename, "wb"); 		   
-//				if (file == NULL) {				  
-//					perror("Failed to open file");				
-//					exit(EXIT_FAILURE); 		   
-//				}
-//	
-//			}
-//			
-//	
-//		} else if (file_count >= MAX_FILES) {
-//			time(&current_time);
-//			if (difftime(current_time, start_time) >= SAVE_INTERVAL) {
-//	            // 파일 닫기            
-//	            fclose(file);
-//				printf("Saved audio data to %s\n", filename);
-//	
-//				file_count=1;
-//	
-//				snprintf(filename, sizeof(filename), "/data/misc/audio_data_%d.raw", file_count);	
-//	
-//				// 파일 열기			  
-//				file = fopen(filename, "wb"); 		   
-//				if (file == NULL) {				  
-//					perror("Failed to open file");				
-//					exit(EXIT_FAILURE); 		   
-//				}
-//	
-//			}
-//		}
-//	
-//	
-//		fwrite(pData, sizeof(short), frames * 2, file);
+	for (int k = 0; k < PCM_CAPTURE_CHANNELS; k++) {
+		AsplSrcBuf_48k[k] = &in_r_48k[k*(frames)];	/* find the frame start for each microphone */
+		AsplSrcBuf[k] = &in_r_16k[k*(frames/3)];	/* find the frame start for each microphone */
+	}
 
-//		pData = (short *) in;
-//	
+	for (int k = 0; k < PCM_REFERENCE_CHANNELS; k++) {
+		AsplRefBuf_48k[k] = &in_r_48k[(PCM_CAPTURE_CHANNELS+k)*(frames)];	/* find the frame start for each microphone */
+		AsplRefBuf[k] = &in_r_16k[(PCM_CAPTURE_CHANNELS+k)*(frames/3)];	 /* find the frame start for each ref channel */
+	}
+
+	for (int j=0; j<(PCM_CAPTURE_CHANNELS+PCM_REFERENCE_CHANNELS); j++) {
+		// set the RX start pointer
+		tempRxPtr = (unsigned char *)pData + j*sizeof(short);
+		// set the WK start pointer
+		tempWkPtr = (unsigned char *)TempResample + j*(frames)*sizeof(short);
+	   
+		for (i=0; i<frames; i++){
+			memcpy(tempWkPtr, tempRxPtr, sizeof(short));
+			tempWkPtr += sizeof(short);
+			tempRxPtr += sizeof(short)*(PCM_CAPTURE_CHANNELS+PCM_REFERENCE_CHANNELS);
+		}
+	}  
+
 //		printf("ASPL effext Process %d",frames);
-	for(i=0;i<frames;i++)
-		TempResample[i]=pData[4*i+0];
 	
-	// 1CH DownSample
-	DoDnsample(&DownSampleHandle1,TempResample, &AsplSrcBuf[0][0], frames, 3, 1.0);
-		
-	for(i=0;i<frames;i++)
-		TempResample[i]=pData[4*i+1];
+	// Mic 1-2CH DownSample
+	DoDnsample(&DownSampleHandle1,&AsplSrcBuf_48k[0][0], &AsplSrcBuf[0][0], frames, 3, 1.0);		
+	DoDnsample(&DownSampleHandle2,&AsplSrcBuf_48k[1][0], &AsplSrcBuf[1][0], frames, 3, 1.0);
 
-	// 2CH DownSample
-	DoDnsample(&DownSampleHandle2,TempResample, &AsplSrcBuf[1][0], frames, 3, 1.0);
-//	
-//	
-	for(i=0;i<frames;i++)
-		TempResample[i]=pData[4*i+2];
-	// DownSample
-	DoDnsample(&DownSampleHandle3,TempResample,&AsplRefBuf[0][0], frames, 3, 1.0);
-//	
-//		for(i=0;i<frames;i++)
-//			TempResample[i]=pData[4*i+3];
-//		// DownSample
-//		DoDnsample(&DownSampleHandle4,TempResample,&AsplRefBuf[1][0],768*2,3,1.0);
+	// Ref DownSample
+	DoDnsample(&DownSampleHandle3,&AsplRefBuf_48k[0][0], &AsplRefBuf[0][0], frames, 3, 0.3);
+	DoDnsample(&DownSampleHandle4,&AsplRefBuf_48k[1][0], &AsplRefBuf[1][0], frames, 3, 0.3);
+
+	for (int k=0 ; k<frames/3; k++){
+		AsplRefBuf[0][k] = AsplRefBuf[0][k] + AsplRefBuf[1][k];
+	}
+			
+//		aspl_AEC_process_single(&AsplSrcBuf[0][0],&AsplRefBuf[0][0], 256, -34 ,-5.0,  &aspl_nr_config);	
+//		int res = aspl_RET_FAIL;
+//		if (aspl_nr_config.AEC_filter_updated == 0) {
+//			res = aspl_AEC_process_filtersave(&AsplSrcBuf[0][0], &AsplRefBuf[0][0], frames/3, -40, 1, -5.0, &aspl_nr_config); 
+//			if (res == aspl_RET_SUCCESS) {
+//	//				FILE *aspl_cfg_fd = NULL;
+//	//	
+//	//				if (NULL == aspl_cfg_fd) {
+//	//					aspl_cfg_fd = fopen("/mnt/setting/markTaec.cfg", "wb");
+//	//				}
+//	//			
+//	//				if (NULL != aspl_cfg_fd) {
+//	//					for (int i=0; i<aspl_nr_config.aec_Mic_N; i++) {
+//	//						fwrite(&aspl_nr_config.AEC_filter_len[i], sizeof(int), 1, aspl_cfg_fd);
+//	//						fwrite(&aspl_nr_config.AEC_globaldelay[i], sizeof(int), 1, aspl_cfg_fd);
+//	//						fwrite(aspl_nr_config.AEC_filter_save[i], sizeof(float), aspl_nr_config.AEC_filter_len[i], aspl_cfg_fd);
+//	//	
+//	//					}
+//	//				}
+//	//	
+//	//				if (NULL != aspl_cfg_fd) {
+//	//					fclose(aspl_cfg_fd);
+//	//					aspl_cfg_fd = NULL;
+//	//				}
+//				aspl_nr_config.AEC_filter_updated = 1;
+//	//				fourthArg = 0;
+//				printf("aspl AEC filter save done.\r\n");
+//			}
+//	//			aspl_NR_process_2mic(&AsplSrcBuf[0][0],frames/3,1,1,&DoAVal);
+//		}else if (aspl_nr_config.AEC_filter_updated == 1) {
+//	//		
+//	//			if (aspl_nr_config.AEC_filter_loaded == 0){
+//	//				FILE *aspl_cfg_read_fd = NULL;
+//	//		
+//	//				if (NULL == aspl_cfg_read_fd) {
+//	//					aspl_cfg_read_fd = fopen("/mnt/setting/markTaec.cfg", "rb");
+//	//					if (aspl_cfg_read_fd == NULL)
+//	//					{
+//	//						printf("aspl AEC filter file open error\r\n");
+//	//						// file open error, you can not read the file.
+//	//					}
+//	//				}
+//	//		
+//	//				if (NULL != aspl_cfg_read_fd) {
+//	//					for (int i=0; i<aspl_nr_config.aec_Mic_N; i++) {
+//	//						fread(&aspl_nr_config.AEC_filter_len[i], sizeof(int), 1, aspl_cfg_read_fd);
+//	//						fread(&aspl_nr_config.AEC_globaldelay[i], sizeof(int), 1, aspl_cfg_read_fd);
+//	//						fread(aspl_nr_config.AEC_filter_save[i], sizeof(float), aspl_nr_config.AEC_filter_len[i], aspl_cfg_read_fd);
+//	//					}
+//	//					aspl_AEC_filterload(&aspl_nr_config);
+//	//					aspl_nr_config.AEC_filter_loaded = 1;
+//	//					printf("aspl AEC filter load done.\r\n");
+//	//				}
+//	//		
+//	//		
+//	//				if (NULL != aspl_cfg_read_fd) {
+//	//					fclose(aspl_cfg_read_fd);
+//	//					aspl_cfg_read_fd = NULL;
+//	//				}				 
+//	//		
+//	//			}
+//		
+//	//			aspl_AEC_process_2ch(data, ref, frame_size, aspl_nr_config.AEC_globaldelay[0], 0.0, &aspl_nr_config);
+//	//			aspl_NR_process_2mic(data, frame_size, Beam_no, 1, &DoA);
 //			
-//	//	aspl_AEC_process_single(&AsplSrcBuf[0][0],&AsplRefBuf[0][0],512,1050,-10.0);	
-//		    aspl_AEC_process_2ch(&AsplSrcBuf[0][0],&AsplRefBuf[0][0],256,aspl_nr_config.AEC_globaldelay[0],0.0,&aspl_nr_config);
-		aspl_NR_process_2mic(&AsplSrcBuf[0][0],256,1,1,&DoAVal);
+//	//			aspl_AEC_process_2ch(&AsplSrcBuf[0][0], &AsplRefBuf[0][0], frames/3, aspl_nr_config.AEC_globaldelay[0], -5.0,&aspl_nr_config);
+//			aspl_NR_process_2mic(&AsplSrcBuf[0][0], &AsplRefBuf[0][0], frames/3, 1, 1, &DoAVal,  &aspl_nr_config);
+//		
+//		
+//		}
 
-	DoUpsample(&UpSampleHandle, &AsplSrcBuf[0][0], TempResample, 256, 3, 1.0);
+	aspl_AEC_process_2ch(&AsplSrcBuf[0][0], &AsplRefBuf[0][0], 256, 0, -5.0, &aspl_nr_config);
+	aspl_NR_process_2mic(&AsplSrcBuf[0][0], &AsplRefBuf[0][0], 256, 1, 1, &DoAVal,  &aspl_nr_config);
+	
 
+
+
+//		aspl_NR_process_2mic(&AsplSrcBuf[0][0],256,1,1,&DoAVal);
+
+	DoUpsample(&UpSampleHandle, &AsplSrcBuf[0][0], TempResample, frames/3, 3, 1.0);
 
 	for(i=0;i<frames;i++) {
 		pData_out[2*i+0] = TempResample[i];

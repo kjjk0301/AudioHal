@@ -42,6 +42,7 @@ typedef struct aecInst_s
     int32_t *uBuf;  // 32비트 정수 버퍼
     int32_t *uBuf2; // 32비트 정수 버퍼
     float *leaky;
+    float *trans_window256;
     float *trans_window512;
     float *trans_window1024;
     float *trans_window1600;
@@ -80,9 +81,11 @@ typedef struct aecInst_s
 
     float gate_aec;
 
+    int chan_num;
+
 } aecInst_t;
 
-aecInst_t *sysAECCreate();
+aecInst_t* sysAECCreate(int channum);
 void AEC_Init(aecInst_t *aecInst);
 int AEC_delay_with_framelen(aecInst_t *aecInst, short *inBuf, short *outBuf, short *d_Buf, int delay, int framelen);
 void AEC_delay_init(aecInst_t *aecInst, short *d_Buf, int delay);

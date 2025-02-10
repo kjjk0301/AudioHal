@@ -49,6 +49,9 @@ commonSrcFiles := \
    aspllib/ccode/ssl_vad.c \
    aspllib/ccode/time_constant.c
 
+# aspllib 파일만 필터링
+aspllibSrcFiles := $(filter aspllib/%,$(commonSrcFiles))
+
 ifeq ($(strip $(BOARD_USE_AUDIO_PREPROCESS)), true)
     commonSrcFiles += effects.c
 endif
@@ -119,6 +122,9 @@ endif
 
 commonCFlags += -Wno-error
 
+# aspllib 파일 전용 CFLAGS 추가 (-O3 최적화 적용)
+aspllibCFlags := $(commonCFlags) -O3
+
 commonSharedLibraries := liblog libcutils libaudioutils libaudioroute \
                          libhardware_legacy libspeexresampler libxml2
 #API 31 -> Android 12.0, Android 12.0 link libtinyalsa_iec958
@@ -167,6 +173,10 @@ LOCAL_SRC_FILES := $(commonSrcFiles)
 LOCAL_C_INCLUDES += $(commonCIncludes)
 LOCAL_HEADER_LIBRARIES += libhardware_headers
 LOCAL_CFLAGS := $(commonCFlags)
+
+# aspllib 소스 파일에만 -O3 적용
+LOCAL_CFLAGS += $(foreach src, $(aspllibSrcFiles), $(if $(findstring $(src), $(commonSrcFiles)), -O3,))
+
 LOCAL_CFLAGS += -DPRIMARY_HAL
 LOCAL_CFLAGS += -DFIX_VOL_AND_SEND_VOL_TO_HAL
 #LOCAL_CFLAGS += -DSET_VOL_IN_HAL

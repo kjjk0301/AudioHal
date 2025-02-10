@@ -119,7 +119,7 @@ int aspl_NR_create(void* data){
     void * NSinst_p=(void *)sysNSCreate();
     void * agcInst_p = (void *)sysAGCCreate();
     void * vadInst_p=(void *)sysSSLVADCreate();
-    void * aecInst_p=(void *)sysAECCreate(NUM_FRAMES);
+    // void * aecInst_p=(void *)sysAECCreate(NUM_FRAMES);
     void * MonInst_p = (void *)sysMonCreate();
 
     // debug_matlab_open();
@@ -128,7 +128,7 @@ int aspl_NR_create(void* data){
     Sys_Total_Inst.agcInst_p = agcInst_p;
     Sys_Total_Inst.NSinst_p = NSinst_p;
     Sys_Total_Inst.vadInst_p = vadInst_p;
-    Sys_Total_Inst.aecInst_p = aecInst_p;
+    // Sys_Total_Inst.aecInst_p = aecInst_p;
     Sys_Total_Inst.MonInst_p = MonInst_p;
 
     Sys_Total_Inst.DC_rej_enable = 1;
@@ -260,7 +260,7 @@ int aspl_NR_create_2mic(void* data){
     void * sslInst_p =  (void *)sysSSLCORECreate();
     void * NSinst_p=(void *)sysNSCreate();
     void * agcInst_p = (void *)sysAGCCreate();
-    void * aecInst_p=(void *)sysAECCreate();
+    // void * aecInst_p=(void *)sysAECCreate();
     void * MonInst_p = (void *)sysMonCreate();
 
     Sys_Total_Inst.polyInst_p = polyInst_p;
@@ -269,7 +269,7 @@ int aspl_NR_create_2mic(void* data){
     Sys_Total_Inst.sslInst_p = sslInst_p;
     Sys_Total_Inst.NSinst_p = NSinst_p;
     Sys_Total_Inst.agcInst_p = agcInst_p;
-    Sys_Total_Inst.aecInst_p = aecInst_p;
+    // Sys_Total_Inst.aecInst_p = aecInst_p;
     Sys_Total_Inst.MonInst_p = MonInst_p;    
 
     Sys_Total_Inst.poly_scale = 12;
@@ -1133,7 +1133,7 @@ int aspl_AEC_create(aspl_NR_CONFIG* config){
     }
 
     for (i=0; i<config_p->aec_Mic_N  ; i++){
-        void * aecInst_p=(void *)sysAECCreate();    
+        void * aecInst_p=(void *)sysAECCreate(i);    
         if (aecInst_p == NULL) {
             printf("aspl_AEC_create :: (aspl_NR_CONFIG *)config is NULL\r\n");
             return aspl_RET_FAIL;
@@ -1146,11 +1146,11 @@ int aspl_AEC_create(aspl_NR_CONFIG* config){
     config_p->offset_Q15_R = 0;
     config_p->offset_Q15_ref = 0;
 
-    config_p->AEC_globaldelay[0] = -68;
-    config_p->AEC_filter_len[0] = 1000;
+    config_p->AEC_globaldelay[0] = -40;
+    config_p->AEC_filter_len[0] = 600;
 
-    config_p->AEC_globaldelay[1] = -68;
-    config_p->AEC_filter_len[1] = 1000;
+    config_p->AEC_globaldelay[1] = -40;
+    config_p->AEC_filter_len[1] = 600;
 
     config_p->AEC_filter_updated = 0;
     config_p->AEC_filter_loaded = 0;
@@ -1196,8 +1196,8 @@ int aspl_AEC_process_2ch(int16_t* data, int16_t* ref, int len, int aec_delay, fl
 
     // AEC_2ch_Proc(aecInstp, &refs_in[0], &mics_in[0][0], &mics_in[0][0], len, aec_delay, 1, micscaledB);
     // AEC_single_Proc(aecInstp[1], &refs_in[0], &mics_in[1][0], &mics_in[1][0], len, config_p->AEC_globaldelay[0], micscaledB);
-    AEC_single_Proc(aecInstp[0], &refs_in[0], &mics_in[0][0], &mics_in[0][0], len, config_p->AEC_globaldelay[0], micscaledB);
-    AEC_single_Proc(aecInstp[1], &refs_in[0], &mics_in[1][0], &mics_in[1][0], len, config_p->AEC_globaldelay[1], micscaledB);
+    AEC_single_Proc(aecInstp[0], &refs_in[0], &mics_in[0][0], &mics_in[0][0], len, aec_delay, micscaledB);
+    AEC_single_Proc(aecInstp[1], &refs_in[0], &mics_in[1][0], &mics_in[1][0], len, aec_delay, micscaledB);
     
     return aspl_RET_SUCCESS;
 }
@@ -1246,6 +1246,12 @@ int aspl_AEC_process_filtersave(int16_t* data, int16_t* ref, int len, int aec_de
 	int16_t   *refs_in;     /* pointers to microphone inputs */
     int16_t   *in_r;
 
+    short   *inputbuf[IN_CHANNELS_2MIC];    
+    short   *refbuf;   
+    short   *work_buf[WORK_CHANNELS_2MIC];     /* pointers to microphone inputs */   
+
+    int j_max;
+
     refs_in = (int16_t *)ref;
 
     in_r  = (short *)data;
@@ -1260,15 +1266,64 @@ int aspl_AEC_process_filtersave(int16_t* data, int16_t* ref, int len, int aec_de
         mics_in[1][i] = (int16_t)DC_rejection(&config_p->offset_Q15_R, mics_in[1][i], 5);
         refs_in[i] = (int16_t)DC_rejection(&config_p->offset_Q15_ref, refs_in[i], 5);
     }
+
+
+    if (len<=CODEC_FRM_LEGNTH_MAX){
+
+        for (int k = 0; k < MULTI_INPUT_CHANNELS; k++) {
+            memcpy(&g_codec_4mic_buf[k][CODEC_BUF_FRONT_LEGNTH],  &mics_in[k][0], sizeof(int16_t)*len);
+            inputbuf[k] = (short *) &g_codec_4mic_buf[k][CODEC_BUF_FRONT_LEGNTH-sample_left];
+        }
+
+        memcpy(&g_codec_4mic_buf[MULTI_INPUT_CHANNELS][CODEC_BUF_FRONT_LEGNTH],  &refs_in[0], sizeof(int16_t)*len);
+        refbuf = (short *) &g_codec_4mic_buf[MULTI_INPUT_CHANNELS][CODEC_BUF_FRONT_LEGNTH-sample_left];        
+
+        j_max = (len+sample_left) / NUM_FRAMES;
+
+        sample_left = (len+sample_left) - (NUM_FRAMES*j_max);
+
+        // printf("len = %d, j_max = %d, sample_left = %d \r\n", len, j_max, Total_Inst_p->sample_left);
+
+    } else {
+        printf("frame length not support\r\n");
+        return aspl_RET_FAIL;
+    } 
+    
+
     ///////////////////////////   DC rejection         ////////////////////////////////////////
     float * filter[2] = {NULL, NULL};
     int filter_len[2];
     int globaldelay[2];
     int res1 = 0;
     int res2 = 0;
+
+    for (int n=0; n<j_max; n++){
+
     // res2=AEC_single_Proc_filter_save(aecInstp[1], &refs_in[0], &mics_in[1][0], &mics_in[1][0], len, aec_delay, delayauto, micscaledB, &filter[1], &filter_len[1], &globaldelay[1]);
-    res1=AEC_single_Proc_filter_save(aecInstp[0], &refs_in[0], &mics_in[0][0], &mics_in[0][0], len, aec_delay, delayauto, micscaledB, &filter[0], &filter_len[0], &globaldelay[0]);
-    res2=AEC_single_Proc_filter_save(aecInstp[1], &refs_in[0], &mics_in[1][0], &mics_in[1][0], len, aec_delay, delayauto, micscaledB, &filter[1], &filter_len[1], &globaldelay[1]);
+        res1=AEC_single_Proc_filter_save(aecInstp[0], &refbuf[n*NUM_FRAMES], &inputbuf[0][n*NUM_FRAMES], &inputbuf[0][n*NUM_FRAMES], NUM_FRAMES, aec_delay, delayauto, micscaledB, &filter[0], &filter_len[0], &globaldelay[0]);
+        res2=AEC_single_Proc_filter_save(aecInstp[1], &refbuf[n*NUM_FRAMES], &inputbuf[1][n*NUM_FRAMES], &inputbuf[1][n*NUM_FRAMES], NUM_FRAMES, aec_delay, delayauto, micscaledB, &filter[1], &filter_len[1], &globaldelay[1]);
+
+    }
+
+    if (len<=CODEC_FRM_LEGNTH_MAX){
+        for (int k = 0; k < MULTI_INPUT_CHANNELS; k++) {
+            for (int i=0; i<len; i++) {
+                mics_in[k][i] = g_codec_4mic_buf[k][i];
+            }
+
+            for (int i=0; i<CODEC_BUF_FRONT_LEGNTH; i++) {
+                g_codec_4mic_buf[k][i] = g_codec_4mic_buf[k][len+i];
+            }
+        }
+        // for (int i=0; i<len; i++) {
+        //     refs_in[i] = g_codec_4mic_buf[MULTI_INPUT_CHANNELS][i];
+        // }
+        for (int i=0; i<CODEC_BUF_FRONT_LEGNTH; i++) {
+                g_codec_4mic_buf[MULTI_INPUT_CHANNELS][i] = g_codec_4mic_buf[MULTI_INPUT_CHANNELS][len+i];
+        }
+    }     
+
+
     if (res1 == 1 && res2 == 1 ) {
         memcpy(config_p->AEC_filter_save[0], filter[0], sizeof(float) *(filter_len[0]));
         config_p->AEC_filter_len[0] = filter_len[0];
@@ -1306,7 +1361,7 @@ int aspl_AEC_filterload(aspl_NR_CONFIG* config){
     return aspl_RET_SUCCESS;
 }
 
-int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double * pDoA){    
+int aspl_NR_process_2mic(short* data, int16_t* ref, int len, int Beam1, int Beam_auto, double * pDoA, aspl_NR_CONFIG* config){    
 
     int i, k, j, m, n;
     int j_max;
@@ -1315,10 +1370,10 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
     short   *outframe_p;
     short   *refframe_p;
     short   *mics_in[IN_CHANNELS_2MIC];     /* pointers to microphone inputs */
-	short   *refs_in[REF_CHANNELS];     /* pointers to microphone inputs */
 
     short   *vad_input[IN_CHANNELS_2MIC];
     short   *inputbuf[IN_CHANNELS_2MIC];    
+    short   *refbuf;   
     short   *work_buf[WORK_CHANNELS_2MIC];     /* pointers to microphone inputs */    
 
     polyInst_t* polyInstp = Sys_Total_Inst.polyInst_p;
@@ -1326,7 +1381,6 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
     vadInst_t* vadInstp = Sys_Total_Inst.vadInst_p;
     sslInst_t* sslInstp = Sys_Total_Inst.sslInst_p;
     nsInst_t* nsInstp = Sys_Total_Inst.NSinst_p;
-    aecInst_t* aecInstp = Sys_Total_Inst.aecInst_p;
     agcInst_t* agcInstp = Sys_Total_Inst.agcInst_p;
 
     in_r  = (short *)(g_data_vad);
@@ -1344,34 +1398,26 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
         mics_in[k] = &in_r[k*len];	/* find the frame start for each microphone */
     }
 
-    // if (len==1024){
-    //     j_max = 2;
-    //     for (k = 0; k < IN_CHANNELS_2MIC; k++) {
-    //         inputbuf[k] = (short *) &mics_in[k][0];
-    //     }        
-    // } else if (len==1600){
-    //     for (k = 0; k < IN_CHANNELS_2MIC; k++) {
-    //         memcpy(&g_codec_4mic_buf[k][CODEC_FRM_LEGNTH], &mics_in[k][0], sizeof(int16_t)*CODEC_FRM_LEGNTH);
-    //         inputbuf[k] = (short *) &g_codec_4mic_buf[k][CODEC_FRM_LEGNTH-sample_left];
-    //     }
+    aspl_NR_CONFIG * config_p = config;
+    if (config_p == NULL) {
+        printf("aspl_NR_process_2mic :: (aspl_NR_CONFIG *)config is NULL\r\n");
+        return aspl_RET_FAIL;
+    } 
 
-    //     if ((CODEC_FRM_LEGNTH+sample_left)>=2048){
-    //         j_max = 4;
-    //     } else {
-    //         j_max = 3;
-    //     }
-
-    //     sample_left = (CODEC_FRM_LEGNTH+sample_left) - (NUM_FRAMES*j_max);
-    // } else if (len==NUM_FRAMES){
-        // j_max = 1;
-        // for (k = 0; k < MULTI_INPUT_CHANNELS; k++) {
-        //     inputbuf[k] = (short *) &mics_in[k][0];
-        // }        
-    // } else {
-    //     printf("frame length not support\r\n");
-    //     return aspl_RET_FAIL;
-    // } 
-
+    // Total_Inst_t* Total_Instp = (void *)&Sys_Total_Inst;
+//	    aecInst_t* aecInstp[2];
+//	    aecInstp[0] = config_p->aecInst_p[0];
+//	    aecInstp[1] = config_p->aecInst_p[1];
+//		int16_t   *refs_in;     /* pointers to microphone inputs */
+//	
+//	    refs_in = (int16_t *)ref;
+//	
+//	    ///////////////////////////   DC rejection         ////////////////////////////////////////
+//	    for (int i = 0; i < len; i++) {
+//	        mics_in[0][i] = (int16_t)DC_rejection(&config_p->offset_Q15_L, mics_in[0][i], 5);
+//	        mics_in[1][i] = (int16_t)DC_rejection(&config_p->offset_Q15_R, mics_in[1][i], 5);
+//	        refs_in[i] = (int16_t)DC_rejection(&config_p->offset_Q15_ref, refs_in[i], 5);
+//	    }
 
     if (len<=CODEC_FRM_LEGNTH_MAX){
 
@@ -1379,6 +1425,9 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
             memcpy(&g_codec_4mic_buf[k][CODEC_BUF_FRONT_LEGNTH],  &mics_in[k][0], sizeof(int16_t)*len);
             inputbuf[k] = (short *) &g_codec_4mic_buf[k][CODEC_BUF_FRONT_LEGNTH-sample_left];
         }
+
+//	        memcpy(&g_codec_4mic_buf[MULTI_INPUT_CHANNELS][CODEC_BUF_FRONT_LEGNTH],  &refs_in[0], sizeof(int16_t)*len);
+//	        refbuf = (short *) &g_codec_4mic_buf[MULTI_INPUT_CHANNELS][CODEC_BUF_FRONT_LEGNTH-sample_left];        
 
         j_max = (len+sample_left) / NUM_FRAMES;
 
@@ -1395,7 +1444,7 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
     for (n=0; n<j_max; n++){
 
         AGC_input_2ch(agcInstp, NUM_FRAMES, &inputbuf[0][n*NUM_FRAMES], &inputbuf[1][n*NUM_FRAMES], &inputbuf[0][n*NUM_FRAMES], &inputbuf[1][n*NUM_FRAMES], agcInstp->globalMakeupGain_dB, agcInstp->threshold_dBFS);            
-
+	
         if (Sys_Total_Inst.DC_rej_enable==1) {
             for (j=0; j<IN_CHANNELS_2MIC; j++){
                 for (i = 0; i < NUM_FRAMES; i++)
@@ -1411,15 +1460,15 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
                 }
             }        
         }  
-
+	
         for (m=0; m<IN_CHANNELS_2MIC; m++){
             ssl_filtering((vadInst_t*) vadInstp, &work_buf[m][0], &BPF_Buf[m][0], &vad_input[m][NUM_FRAMES/2]);
-
+	
             // frame_p = (void*)&work_buf[m][0];
             // refframe_p = (void*)&vad_input[m][NUM_FRAMES/2];
             // memcpy(refframe_p, frame_p, NUM_FRAMES*sizeof(int16_t));
         }            
-
+	
         k=0;
         short vad_sum=0;
         for (m = ssl_blocksize/2 ; m<(NUM_FRAMES-ssl_blocksize) ; m=m+ssl_blocksize/2){
@@ -1427,28 +1476,28 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
             vad_sum += vad_min[k];
             k++;
         }
-
+	
         // AGC_input_2ch(agcInstp, NUM_FRAMES, &vad_input[0][NUM_FRAMES/2], &vad_input[1][NUM_FRAMES/2], &vad_input[0][NUM_FRAMES/2], &vad_input[1][NUM_FRAMES/2], agcInstp->globalMakeupGain_dB, agcInstp->threshold_dBFS);
-
-
-
+	
+	
+	
         k=0;
         for (m = ssl_blocksize/2 ; m<(NUM_FRAMES-ssl_blocksize) ; m=m+ssl_blocksize/2){
             ssl_core_process_2ch((sslInst_t*) sslInstp, &vad_input[0][m], &vad_input[1][m], &DoA_mean, mode_normal, vad_sum);
             k++;
-
+	
             if ((DoA_mean != -1)){
                 g_DoA = DoA_mean;
-                if (g_DoA < -75.0) g_Beamno = 0;
-                else if (g_DoA < -55.0) g_Beamno = 1;
-                else if (g_DoA < -38.0) g_Beamno = 2;
+                if (g_DoA < -60.0) g_Beamno = 0;
+                else if (g_DoA < -50.0) g_Beamno = 1;
+                else if (g_DoA < -35.0) g_Beamno = 2;
                 else if (g_DoA < -15.0) g_Beamno = 3;
                 else if (g_DoA < 15.0) g_Beamno = 4;
-                else if (g_DoA < 38.0) g_Beamno = 5;
-                else if (g_DoA < 55.0) g_Beamno = 6;
-                else if (g_DoA < 75.0) g_Beamno = 7;
+                else if (g_DoA < 35.0) g_Beamno = 5;
+                else if (g_DoA < 50.0) g_Beamno = 6;
+                else if (g_DoA < 60.0) g_Beamno = 7;
                 else g_Beamno = 8;
-
+	
                 no_DoA_cnt = 0;
                 printf("\n*************************************************************************\r\n");
                 printf("DoA = %.2f degree, Beam no = %d \r\n\n", g_DoA, g_Beamno);     
@@ -1461,22 +1510,22 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
                 }
             }
         }
-
+	
         for (m=0; m<IN_CHANNELS_2MIC; m++){
             frame_p = (void*)&vad_input[m][NUM_FRAMES];
             refframe_p = (void*)&vad_input[m][0];
             memcpy(refframe_p, frame_p, (NUM_FRAMES/2)*sizeof(int16_t));
         }           
-
+	
         if (Beam_auto==1){
             if (g_DoA != -1){
                 Beam1 = g_Beamno;
             }
-
+	
         }
-
+	
         // printf("DoA = %.2f degree, Beam no = %d no_DoA_cnt=%d \r\n", g_DoA, g_Beamno, no_DoA_cnt );
-
+	
         *pDoA = g_DoA;
         if ((*pDoA) >= 0.0){
             // printf("\n*************************************************************************\r\n");
@@ -1486,20 +1535,20 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
               
         
         // AGC_band(agcInstp, &fft_ref_mat[0][0], &fft_ref_mat[0][0]);
-
+	
         // frame_p = (void*)refs_in[0];
         // poly_analysis(polyInstp, frame_p, &fft_ref_mat[0][0], (MicN), (int)(1)<<18);
-
+	
         int temp_scale = ((int)(1)<<(Sys_Total_Inst.poly_scale));
-
+	
         for (m = 0; m<IN_CHANNELS_2MIC ; m++){	
             frame_p = (void*)work_buf[m];
             poly_analysis(polyInstp, frame_p, &fft_in_mat[m][0], m, temp_scale);
         }    
-
-
+	
+	
         if (Sys_Total_Inst.bf_enable==1) {
-
+	
             BF_process(bfInstp);
             BF_process_rear(bfInstp);
             
@@ -1519,16 +1568,16 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
                 }
             }	
         }    
-
-
+	
+	
     //     m=PolyL*2;
     //     for (k=1 ; k<PolyM/2 ; k++){
     //         sb_AEC_Proc(aecInstp, &fft_ref_mat[0][m], &fft_bf_mat[Beam1][m], &fft_out_mat[1][m], k);
     // //		        sb_AEC_Proc(inst_p, &fft_ref_mat[0][m], &fft_in_mat[0][m], &fft_out_mat[m], k);
     //         m=m+PolyL*2;
     //     }
-
-
+	
+	
         if (Sys_Total_Inst.NS_enable==1){
             // NS_process(nsInstp, &fft_in_mat[0][0], &fft_ns_buf_mat[0], &fft_out_mat[0], count_pre);
             if (total_idx < 50) {
@@ -1551,10 +1600,10 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
                 
             }
         } 
-
-
+	
+	
         temp_scale = ((int)(1)<<(15-Sys_Total_Inst.poly_scale));
-
+	
         for (m = 0; m<1 ; m++){	
             outframe_p =  (void*)&inputbuf[m][n*NUM_FRAMES];
             if (Sys_Total_Inst.bf_enable==1) {
@@ -1564,15 +1613,15 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
                     // poly_synthesis(polyInstp, &fft_in_mat[m][0], outframe_p, m, temp_scale);
                     // poly_synthesis(polyInstp, &fft_bf_rear_mat[m*2][0], outframe_p, m, temp_scale);
                 } else {
-                    // poly_synthesis(polyInstp, &fft_bf_mat[Beam1][0], outframe_p, m, temp_scale);
-                    poly_synthesis(polyInstp, &fft_in_mat[m][0], outframe_p, m, temp_scale);
+                    poly_synthesis(polyInstp, &fft_bf_mat[Beam1][0], outframe_p, m, temp_scale);
+                    // poly_synthesis(polyInstp, &fft_in_mat[m][0], outframe_p, m, temp_scale);
                     // poly_synthesis(polyInstp, &fft_bf_rear_mat[Beam1][0], outframe_p, m, temp_scale);
                 }
             } else {
                 if (Sys_Total_Inst.NS_enable==1){
                     // poly_synthesis(polyInstp, &fft_bf_mat[m*2][0], outframe_p, m, temp_scale);
-                    // poly_synthesis(polyInstp, &fft_out_mat[m][0], outframe_p, m, temp_scale);
-                    poly_synthesis(polyInstp, &fft_in_mat[m][0], outframe_p, m, temp_scale);
+                    poly_synthesis(polyInstp, &fft_out_mat[m][0], outframe_p, m, temp_scale);
+                    // poly_synthesis(polyInstp, &fft_in_mat[m][0], outframe_p, m, temp_scale);
                     // poly_synthesis(polyInstp, &fft_bf_rear_mat[m*2][0], outframe_p, m, temp_scale);
                 } else {
                     // poly_synthesis(polyInstp, &fft_in_mat[Beam1/2][0], outframe_p, m, temp_scale);
@@ -1582,7 +1631,7 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
                 
             }
         }   
-
+	
         int temp;
         for (j = 0; j<1 ; j++){
                 for (i = 0; i < NUM_FRAMES; i++)
@@ -1603,21 +1652,13 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
                 g_codec_4mic_buf[k][i] = g_codec_4mic_buf[k][len+i];
             }
         }
+//	        for (i=0; i<len; i++) {
+//	            refs_in[i] = g_codec_4mic_buf[MULTI_INPUT_CHANNELS][i];
+//	        }
+        for (i=0; i<CODEC_BUF_FRONT_LEGNTH; i++) {
+                g_codec_4mic_buf[MULTI_INPUT_CHANNELS][i] = g_codec_4mic_buf[MULTI_INPUT_CHANNELS][len+i];
+        }
     }           
-
-    // if (len==1600){
-    //     for (k = 0; k < IN_CHANNELS_2MIC; k++) {
-    //         for (i=0; i<CODEC_FRM_LEGNTH; i++) {
-    //             mics_in[k][i] = g_codec_4mic_buf[k][i];
-    //         }
-    //     }
-
-    //     for (k = 0; k < IN_CHANNELS_2MIC; k++) {
-    //         for (i=0; i<CODEC_FRM_LEGNTH; i++) {
-    //             g_codec_4mic_buf[k][i] = g_codec_4mic_buf[k][CODEC_FRM_LEGNTH+i];
-    //         }
-    //     }
-    // }
 
     return aspl_RET_SUCCESS;    
 }

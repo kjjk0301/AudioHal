@@ -17,15 +17,15 @@
 #define DEBUG_AEC
 
 #define FRAME_SIZE 1600 // 프레임 크기
-#define FILTER_LENGTH 1000
-#define FILTER_LENGTH2 500
+#define FILTER_LENGTH 600
+#define FILTER_LENGTH2 600
 #define LEAKY_LENGTH 1500
-#define STEP_SIZE 1.2f // 스텝 사이즈 (부동소수점)
-#define STEP_SIZE2 0.1f // 스텝 사이즈 (부동소수점)
+#define STEP_SIZE 1.0f // 스텝 사이즈 (부동소수점)
+#define STEP_SIZE2 0.07f // 스텝 사이즈 (부동소수점)
 #define MIN_POWER -45.0f // dBFS 기준 최소 파워
 #define SAMPLE_RATE 16000 // 샘플링 주파수
 #define LONG_LONG_MIN (-9223372036854775807LL - 1) // 최소 long long 값 정의
-#define MAX_DELAY 2000 // 최대 딜레이 범위 (±2000 샘플)
+#define MAX_DELAY 200 // 최대 딜레이 범위 (±2000 샘플)
 #define DELAY_BUFFER_SIZE (1600 + MAX_DELAY * 2) // 추가 버퍼 크기
 
 // aecInst_t Sys_aecInst;
@@ -82,13 +82,11 @@ void generate_pink_noise(float *noiseBuffer, int length, float noiseLevel);
 void add_comfort_noise(int16_t *signal, float *noise, int length, float noiseGainDbfs);
 void calc_prod(float * prod, float * weight, int32_t filt_len);
 
-
-
-
-aecInst_t* sysAECCreate()
+aecInst_t* sysAECCreate(int channum)
 {
     aecInst_t * aecInst_p = malloc(sizeof(aecInst_t));
     AEC_Init(aecInst_p);
+    aecInst_p->chan_num = channum;
 
     return aecInst_p;
 }
@@ -123,6 +121,9 @@ void AEC_DeInit(aecInst_t *aecInst)
 
         if (inst->leaky != NULL)
             free(inst->leaky);
+
+        if (inst->trans_window256 != NULL)
+            free(inst->trans_window256);
 
         if (inst->trans_window512 != NULL)
             free(inst->trans_window512);
@@ -222,6 +223,13 @@ void AEC_Init(aecInst_t *aecInst)
         return;
     }
 
+    inst->trans_window256 = (float *)malloc(FRAME_SIZE * 2 * sizeof(float)); // by skj
+    if (inst->trans_window256 == NULL)
+    {
+        perror("AEC_Init malloc fail: trans_window512");
+        return;
+    }
+
     inst->trans_window512 = (float *)malloc(FRAME_SIZE * 2 * sizeof(float)); // by skj
     if (inst->trans_window512 == NULL)
     {
@@ -271,6 +279,9 @@ void AEC_Init(aecInst_t *aecInst)
         return;
     }    
     ///////////////////////////////////////////////// malloc
+
+    for (int i = 0; i < 256 * 2; i++)
+        inst->trans_window256[i] = .5 - .5 * cos(2 * M_PI * i / (256 * 2));
 
     for (int i = 0; i < 512 * 2; i++)
         inst->trans_window512[i] = .5 - .5 * cos(2 * M_PI * i / (512 * 2));
@@ -783,7 +794,7 @@ void nlms_echo_canceller_2ch_two_path(aecInst_t *aecInst, int16_t *refSignal, in
         inst->adapted = 1;
     }
 #ifdef DEBUG_AEC
-	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)){
+	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
        
         FloatPacket packet;
         // packet.val1 = (float)((Sff-See)*fabsf(Sff-See));
@@ -806,7 +817,7 @@ void nlms_echo_canceller_2ch_two_path(aecInst_t *aecInst, int16_t *refSignal, in
         // debug_matlab_ssl_float_send(10, (Dbf));
     }
 
-	if ((g_aec_debug_on==1)){
+	if ((g_aec_debug_on==1)&&(inst->chan_num==0)){
 		g_aec_debug_snd_idx++;
 		if (g_aec_debug_snd_idx>=g_aec_debug_snd_period) {
 			g_aec_debug_snd_idx = 0;
@@ -844,6 +855,8 @@ void nlms_echo_canceller_two_path(aecInst_t *aecInst, int16_t *refSignal, int16_
         trans_window = &inst->trans_window1600[0];
     } else if (length == 512) {
         trans_window = &inst->trans_window512[0];
+    } else if (length == 256) {
+        trans_window = &inst->trans_window256[0];        
     } else {
         for (int i = 0; i < length * 2; i++) {
             inst->trans_window1600[i] = .5 - .5 * cos(2 * M_PI * i / (length * 2));        
@@ -891,7 +904,7 @@ void nlms_echo_canceller_two_path(aecInst_t *aecInst, int16_t *refSignal, int16_
        
         int32_t y = 16384;
         int m = curidx;
-        for (int i = 0; i < FILTER_LENGTH/2; i++) {
+        for (int i = 0; i < FILTER_LENGTH; i++) {
             y += (weightsQ15[i] * x[m--]);
             // m--;
         }
@@ -970,7 +983,7 @@ void nlms_echo_canceller_two_path(aecInst_t *aecInst, int16_t *refSignal, int16_
     float mu;
     // 스텝 크기 조정
     if (updateon==1) {
-        if (*prevAttenuation > 25.0f || refPower < -50.0f){
+        if (*prevAttenuation > 15.0f || refPower < -50.0f){
             mu = 0.1f * step_size1000 / normFactor;
         } else if (inst->adapted){
             mu = 0.7f * step_size1000 / normFactor;
@@ -1006,7 +1019,7 @@ void nlms_echo_canceller_two_path(aecInst_t *aecInst, int16_t *refSignal, int16_
 
     float See = 0.0f;
     for (int nn=0; nn<itermax; nn++){
-        if (nn>1) filt_iter = 500;
+        if (nn>1) filt_iter = 300;
         for (int n = 0; n < length; n++) {
             int curidx=FILTER_LENGTH-1+n;
             for (int i = 0; i < filt_iter; i++) {
@@ -1149,7 +1162,7 @@ void nlms_echo_canceller_two_path(aecInst_t *aecInst, int16_t *refSignal, int16_
 #endif        
         }
 
-        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)){
+        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
             for (int i = 0; i < FILTER_LENGTH; i++) {
                 weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
             }
@@ -1183,7 +1196,7 @@ void nlms_echo_canceller_two_path(aecInst_t *aecInst, int16_t *refSignal, int16_
             inst->Dvar1 = 0.0;
             inst->Dvar2 = 0.0;
 
-	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)){
+	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
                 for (int i = 0; i < FILTER_LENGTH; i++) {
                     weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
                 }                
@@ -1191,7 +1204,7 @@ void nlms_echo_canceller_two_path(aecInst_t *aecInst, int16_t *refSignal, int16_
 
             // printf("reset back\n");
         }  else {
-	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)){            
+	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){            
                 for (int i = 0; i < FILTER_LENGTH; i++) {
                     weightsQ15[i] = (int32_t)(weights_fore[i] * 32768.0f);
                 }                
@@ -1216,13 +1229,15 @@ void nlms_echo_canceller_two_path(aecInst_t *aecInst, int16_t *refSignal, int16_
     int resetWeights = 0; // 초기값: 0 (거짓)
     for (int i = 0; i < FILTER_LENGTH; i++) {
         if (fabs(weights[i]) > WEIGHT_THRESHOLD || isnan(weights[i])) {
+            printf("inst= %d, Weights[%d] is %f\n", inst->chan_num, i, fabs(weights[i]));
             resetWeights = 1; // 참
             break;
         }
     }
     if (resetWeights) {
         for (int i = 0; i < FILTER_LENGTH; i++) {
-            weights[i] = 0.0f; // 필터 계수를 0으로 초기화
+            // weights[i] = 0.0f; // 필터 계수를 0으로 초기화
+            weights[i] = weights_fore[i]; // 필터 계수를 0으로 초기화
         }
         inst->adapted = 0;
         inst->sum_adapt = 0;
@@ -1284,7 +1299,7 @@ void nlms_echo_canceller_two_path(aecInst_t *aecInst, int16_t *refSignal, int16_
 
 
 #ifdef DEBUG_AEC
-	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)){
+	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
        
         FloatPacket packet;
         // packet.val1 = (float)((Sff-See)*fabsf(Sff-See));
@@ -1312,7 +1327,7 @@ void nlms_echo_canceller_two_path(aecInst_t *aecInst, int16_t *refSignal, int16_
         // debug_matlab_ssl_float_send(10, (Dbf));
     }
 
-	if ((g_aec_debug_on==1)){
+	if ((g_aec_debug_on==1)&&(inst->chan_num==0)){
 		g_aec_debug_snd_idx++;
 		if (g_aec_debug_snd_idx>=g_aec_debug_snd_period) {
 			g_aec_debug_snd_idx = 0;
@@ -1668,7 +1683,7 @@ void nlms_echo_canceller_two_path_soft(aecInst_t *aecInst, int16_t *refSignal, i
 #endif        
         }
 
-        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)){
+        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
             for (int i = 0; i < FILTER_LENGTH; i++) {
                 weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
             }
@@ -1702,7 +1717,7 @@ void nlms_echo_canceller_two_path_soft(aecInst_t *aecInst, int16_t *refSignal, i
             inst->Dvar1 = 0.0;
             inst->Dvar2 = 0.0;
 
-	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)){
+	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
                 for (int i = 0; i < FILTER_LENGTH; i++) {
                     weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
                 }                
@@ -1710,7 +1725,7 @@ void nlms_echo_canceller_two_path_soft(aecInst_t *aecInst, int16_t *refSignal, i
 
             // printf("reset back\n");
         }  else {
-	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)){            
+	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){            
                 for (int i = 0; i < FILTER_LENGTH; i++) {
                     weightsQ15[i] = (int32_t)(weights_fore[i] * 32768.0f);
                 }                
@@ -1735,6 +1750,7 @@ void nlms_echo_canceller_two_path_soft(aecInst_t *aecInst, int16_t *refSignal, i
     int resetWeights = 0; // 초기값: 0 (거짓)
     for (int i = 0; i < FILTER_LENGTH; i++) {
         if (fabs(weights[i]) > WEIGHT_THRESHOLD || isnan(weights[i])) {
+            printf("Weights[%d] is %f\n", i, fabs(weights[i]));
             resetWeights = 1; // 참
             break;
         }
@@ -1803,7 +1819,7 @@ void nlms_echo_canceller_two_path_soft(aecInst_t *aecInst, int16_t *refSignal, i
 
 
 #ifdef DEBUG_AEC
-	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)){
+	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
        
         FloatPacket packet;
         // packet.val1 = (float)((Sff-See)*fabsf(Sff-See));
@@ -1831,7 +1847,7 @@ void nlms_echo_canceller_two_path_soft(aecInst_t *aecInst, int16_t *refSignal, i
         // debug_matlab_ssl_float_send(10, (Dbf));
     }
 
-	if ((g_aec_debug_on==1)){
+	if ((g_aec_debug_on==1)&&(inst->chan_num==0)){
 		g_aec_debug_snd_idx++;
 		if (g_aec_debug_snd_idx>=g_aec_debug_snd_period) {
 			g_aec_debug_snd_idx = 0;
@@ -1868,6 +1884,8 @@ void nlms_echo_canceller_two_path_strong(aecInst_t *aecInst, int16_t *refSignal,
         trans_window = &inst->trans_window1600[0];
     } else if (length == 512) {
         trans_window = &inst->trans_window512[0];
+    } else if (length == 256) {
+        trans_window = &inst->trans_window256[0];             
     } else {
 
         for (int i = 0; i < length * 2; i++) {
@@ -1917,7 +1935,7 @@ void nlms_echo_canceller_two_path_strong(aecInst_t *aecInst, int16_t *refSignal,
        
         int32_t y = 16384;
         int m = curidx;
-        for (int i = 0; i < FILTER_LENGTH/2; i++) {
+        for (int i = 0; i < FILTER_LENGTH; i++) {
             y += (weightsQ15[i] * x[m--]);
             // m--;
         }
@@ -1996,7 +2014,7 @@ void nlms_echo_canceller_two_path_strong(aecInst_t *aecInst, int16_t *refSignal,
     float mu;
     // 스텝 크기 조정
     if (updateon==1) {
-        mu = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? 0.1f * step_size1000 / normFactor : step_size1000 / normFactor;
+        mu = (*prevAttenuation > 15.0f || refPower < -50.0f || inst->adapted) ? 0.1f * step_size1000 / normFactor : step_size1000 / normFactor;
         // n_mu_Q28 = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? n_mu_Q28>>3 : n_mu_Q28;
     } else {
         mu = 0.1f * step_size1000 / normFactor;
@@ -2018,7 +2036,7 @@ void nlms_echo_canceller_two_path_strong(aecInst_t *aecInst, int16_t *refSignal,
     float Attenuationtmp = *prevAttenuation;
 
     int itermax = 1;
-    if (inst->adapted==0 && Attenuationtmp <= 20.0f){
+    if (inst->adapted==0 && Attenuationtmp <= 15.0f){
         if (refPower > -40.0f ){
             itermax = 5;
         //     printf("itermax = 5\r\n");
@@ -2184,7 +2202,7 @@ void nlms_echo_canceller_two_path_strong(aecInst_t *aecInst, int16_t *refSignal,
 #endif        
         }
 
-        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)){
+        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
             for (int i = 0; i < FILTER_LENGTH; i++) {
                 weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
             }
@@ -2218,7 +2236,7 @@ void nlms_echo_canceller_two_path_strong(aecInst_t *aecInst, int16_t *refSignal,
             inst->Dvar1 = 0.0;
             inst->Dvar2 = 0.0;
 
-	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)){
+	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
                 for (int i = 0; i < FILTER_LENGTH; i++) {
                     weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
                 }                
@@ -2226,7 +2244,7 @@ void nlms_echo_canceller_two_path_strong(aecInst_t *aecInst, int16_t *refSignal,
 
             // printf("reset back\n");
         }  else {
-	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)){            
+	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){            
                 for (int i = 0; i < FILTER_LENGTH; i++) {
                     weightsQ15[i] = (int32_t)(weights_fore[i] * 32768.0f);
                 }                
@@ -2251,13 +2269,14 @@ void nlms_echo_canceller_two_path_strong(aecInst_t *aecInst, int16_t *refSignal,
     int resetWeights = 0; // 초기값: 0 (거짓)
     for (int i = 0; i < FILTER_LENGTH; i++) {
         if (fabs(weights[i]) > WEIGHT_THRESHOLD || isnan(weights[i])) {
+            printf("inst= %d, Weights[%d] is %f\n", inst->chan_num, i, fabs(weights[i]));
             resetWeights = 1; // 참
             break;
         }
     }
     if (resetWeights) {
         for (int i = 0; i < FILTER_LENGTH; i++) {
-            weights[i] = 0.0f; // 필터 계수를 0으로 초기화
+            weights[i] = weights_fore[i]; // 필터 계수를 0으로 초기화
         }
         inst->adapted = 0;
         inst->sum_adapt = 0;
@@ -2278,7 +2297,7 @@ void nlms_echo_canceller_two_path_strong(aecInst_t *aecInst, int16_t *refSignal,
         inst->sum_adapt += inst->adapt_rate;
     }
 
-    if (!inst->adapted && inst->sum_adapt > 15 && *prevAttenuation > 24.0f)
+    if (!inst->adapted && inst->sum_adapt > 15 && *prevAttenuation > 15.0f)
     {    
         inst->adapted = 1;
 
@@ -2322,7 +2341,7 @@ void nlms_echo_canceller_two_path_strong(aecInst_t *aecInst, int16_t *refSignal,
 
 
 #ifdef DEBUG_AEC
-	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)){
+	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
        
         FloatPacket packet;
         // packet.val1 = (float)((Sff-See)*fabsf(Sff-See));
@@ -2350,7 +2369,7 @@ void nlms_echo_canceller_two_path_strong(aecInst_t *aecInst, int16_t *refSignal,
         // debug_matlab_ssl_float_send(10, (Dbf));
     }
 
-	if ((g_aec_debug_on==1)){
+	if ((g_aec_debug_on==1)&&(inst->chan_num==0)){
 		g_aec_debug_snd_idx++;
 		if (g_aec_debug_snd_idx>=g_aec_debug_snd_period) {
 			g_aec_debug_snd_idx = 0;
@@ -2368,77 +2387,97 @@ void nlms_echo_canceller(aecInst_t *aecInst, int16_t *refSignal, int16_t *micSig
 
     const float WEIGHT_THRESHOLD = 5.0f; // 필터 가중치의 상한 값
 
-    int32_t weightsQ15[FILTER_LENGTH2];
+    int32_t weightsQ15[FILTER_LENGTH];
 
-    for (int n=0; n<FILTER_LENGTH2-1; n++){
+    for (int n=0; n<FILTER_LENGTH-1; n++){
         x[n]=x[n+length];
     }
 
     for (int n=0; n<length; n++){
-        x[n+FILTER_LENGTH2-1]=refSignal[n];
+        x[n+FILTER_LENGTH-1]=refSignal[n];
     }
 
     float normFactor = 500.0f;
-    for (int n=0; n<FILTER_LENGTH2; n++){
+    for (int n=0; n<FILTER_LENGTH; n++){
         normFactor += (float)((int32_t)x[n+length-1] * (int32_t)x[n+length-1]);
     }
 
     float mu;
     // 스텝 크기 조정
-    if (inst->update_fore==1) {
-        mu = (*prevAttenuation > 5.0f || refPower < -40.0f) ? 0.05f * STEP_SIZE2 / normFactor : STEP_SIZE2 / normFactor;
+    if (updateon==1) {
+        mu = (*prevAttenuation > 25.0f || refPower < -40.0f) ? 0.5f * STEP_SIZE2 / normFactor : STEP_SIZE2 / normFactor;
     } else {
         mu = 0.05f * STEP_SIZE2 / normFactor;
     }
 
-    for (int n = 0; n < length; n++) {
-
-        int curidx=FILTER_LENGTH2-1+n;
-
-        for (int i = 0; i < FILTER_LENGTH2; i++) {
-            weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
+    int itermax = 1;
+    if (*prevAttenuation <= 25.0f){
+        if (refPower > -40.0f ){
+            itermax = 5;
         }
+    }
 
-        int32_t y = 16384;
-        int m = curidx;
-        for (int i = 0; i < FILTER_LENGTH2; i++) {
-            y += (weightsQ15[i] * x[m]);
-            m--;
-        }
+    int filt_iter = 150;
 
-        y = y>>15;
+    for (int nn=0; nn<itermax; nn++){
+        if (nn==(itermax-1)) filt_iter = FILTER_LENGTH;
 
-        // 잔차 신호 계산
-        float e = (float)micSignal[n] -  (float)y;
-        errorSignal[n] = (int16_t)e;
+        for (int n = 0; n < length; n++) {
 
-        if (updateon==1) {
-            float e_mu_temp = mu * e;
+            int curidx=FILTER_LENGTH-1+n;
 
-            // 필터 가중치 업데이트 (플로팅 연산)
-            m = curidx;
-            for (int i = 0; i < FILTER_LENGTH2; i++) {
-                // weights[i] = weights[i] * leaky[i] + mu * e * (float)x[m];
-                weights[i] = weights[i] + e_mu_temp * (float)x[m];
+            for (int i = 0; i < filt_iter; i++) {
+                weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
+            }
+
+            int32_t y = 16384;
+            int m = curidx;
+            for (int i = 0; i < filt_iter; i++) {
+                y += (weightsQ15[i] * x[m]);
                 m--;
             }
-        } else {
-            // for (int i = 0; i < FILTER_LENGTH2; i++) {
-            //     weights[i] = weights[i] * leaky[i];
-            // }            
+
+            y = y>>15;
+
+            // 잔차 신호 계산
+            float e = (float)micSignal[n] -  (float)y;
+            errorSignal[n] = (int16_t)e;
+
+            if (updateon==1) {
+                float e_mu_temp = mu * e;
+
+                // 필터 가중치 업데이트 (플로팅 연산)
+                m = curidx;
+                for (int i = 0; i < filt_iter; i++) {
+                    // weights[i] = weights[i] * leaky[i] + mu * e * (float)x[m];
+                    weights[i] = weights[i] + e_mu_temp * (float)x[m];
+
+                    // if (inst->adapted){
+                    //     weights[i] = weights[i] + (e_mu_temp * ((float)x[m])) * inst->prod[i];
+                    // } else {
+                    //     weights[i] = weights[i] + e_mu_temp * ((float)x[m]);
+                    // }
+
+                    m--;
+                }
+            } else {
+                // for (int i = 0; i < FILTER_LENGTH; i++) {
+                //     weights[i] = weights[i] * leaky[i];
+                // }            
+            }
         }
     }
 
     // 필터 계수 발산 방지
     int resetWeights = 0; // 초기값: 0 (거짓)
-    for (int i = 0; i < FILTER_LENGTH2; i++) {
+    for (int i = 0; i < FILTER_LENGTH; i++) {
         if (fabs(weights[i]) > WEIGHT_THRESHOLD || isnan(weights[i])) {
             resetWeights = 1; // 참
             break;
         }
     }
     if (resetWeights) {
-        for (int i = 0; i < FILTER_LENGTH2; i++) {
+        for (int i = 0; i < FILTER_LENGTH; i++) {
             weights[i] = 0.0f; // 필터 계수를 0으로 초기화
         }
         printf("Weights reset to prevent divergence on second stage.\n");
@@ -2450,41 +2489,50 @@ void nlms_echo_canceller(aecInst_t *aecInst, int16_t *refSignal, int16_t *micSig
     *prevAttenuation = 20.0f * log10f(micPower / (errorPower + 1));
     // printf("micPower= %.2f, errorPower=%.2f, Attenuation = %.2f updateon=%d\n",20.0f * log10f(micPower)-90.3f, 20.0f * log10f(errorPower)-90.3f, *prevAttenuation, updateon);
 
-// #ifdef DEBUG_AEC
-// 	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)){
+//	    if (!inst->adapted && *prevAttenuation > 15.0f)
+//	    {    
+//	        inst->adapted = 1;
+//	
+//	        calc_prod(inst->prod, weights, FILTER_LENGTH);
+//	    }
 
-//         for (int i = 0; i < FILTER_LENGTH2; i++) {
-//             weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
-//         }          
+
+#ifdef DEBUG_AEC
+	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
        
-//         FloatPacket packet;
-//         // packet.val1 = (float)((Sff-See)*fabsf(Sff-See));
-//         // packet.val2 = (float)(Sff*Dbf);
-//         // packet.val3 = (float)((inst->Davg1)*fabsf(inst->Davg1));
-//         // packet.val4 = (float)(0.5*inst->Dvar1);
-//         // packet.val5 = (float)((inst->Davg2)*fabsf(inst->Davg2));
-//         // packet.val6 = (float)(0.25*inst->Dvar2);
+        FloatPacket packet;
+        // packet.val1 = (float)((Sff-See)*fabsf(Sff-See));
+        // packet.val2 = (float)(Sff*Dbf);
+        // packet.val3 = (float)((inst->Davg1)*fabsf(inst->Davg1));
+        // packet.val4 = (float)(0.5*inst->Dvar1);
+        // packet.val5 = (float)((inst->Davg2)*fabsf(inst->Davg2));
+        // packet.val6 = (float)(0.25*inst->Dvar2);
 
-//         packet.val1 = (float)calculate_rms_int32(refSignal, length);
-//         packet.val2 = (float)micPower;
-//         packet.val3 = (float)micPower;
-//         packet.val4 = (float)errorPower;
-//         packet.val5 = (float)0.0;
-//         packet.val6 = (float)0.0;        
+        packet.val1 = (float)calculate_rms_int32((int16_t *)refSignal, length);
+        packet.val2 = (float)micPower;
+        packet.val3 = (float)micPower;
+        packet.val4 = (float)errorPower;
+        packet.val5 = (float)inst->sum_adapt;
+        packet.val6 = (float)inst->adapt_rate;        
 
-//         debug_matlab_ssl_float_packet_send(8, packet);
-//         debug_matlab_int_array_send(9, &weightsQ15[0], FILTER_LENGTH2);
-//         debug_matlab_ssl_float_send(10, (*prevAttenuation));
-//         // debug_matlab_ssl_float_send(10, (Dbf));
-//     }
+        debug_matlab_ssl_float_packet_send(8, packet);
+        debug_matlab_int_array_send(9, &weightsQ15[0], FILTER_LENGTH);
+        // debug_matlab_int_array_send(9, &w_real_Q33[0], FILTER_LENGTH);
 
-// 	if ((g_aec_debug_on==1)){
-// 		g_aec_debug_snd_idx++;
-// 		if (g_aec_debug_snd_idx>=g_aec_debug_snd_period) {
-// 			g_aec_debug_snd_idx = 0;
-// 		}
-// 	}
-// #endif 
+        debug_matlab_ssl_float_send(10, (*prevAttenuation));
+        // debug_matlab_ssl_float_send(10, e_mu_temp*8.5899e+09);
+        // debug_matlab_ssl_float_send(10, (float)n_e_mu_Q23);
+
+        // debug_matlab_ssl_float_send(10, (Dbf));
+    }
+
+	if ((g_aec_debug_on==1)&&(inst->chan_num==0)){
+		g_aec_debug_snd_idx++;
+		if (g_aec_debug_snd_idx>=g_aec_debug_snd_period) {
+			g_aec_debug_snd_idx = 0;
+		}
+	}
+#endif 
 
 }
 
@@ -2682,7 +2730,7 @@ void AEC_single_Proc(aecInst_t *aecInst, int16_t *inBufRef, int16_t *inBufMic, i
 
     int updateon=1;
     float micscale = powf(10.0f, MicscaledB/20.0);
-    int32_t pre_emph_q15 = (int32_t)(0.7f * 32768.0f);
+    int32_t pre_emph_q15 = (int32_t)(0.6f * 32768.0f);
 
     if (inBufRef != NULL) {
 
@@ -2693,8 +2741,8 @@ void AEC_single_Proc(aecInst_t *aecInst, int16_t *inBufRef, int16_t *inBufMic, i
         memcpy(&refSignal[0], &inBufRef[0], sizeof(int16_t)*framelen);
 
         // pre_emphasis(&inBufRef[0], pre_emph_q15, &inst->mem_r, framelen);
-        pre_emphasis(&refSignal[0], pre_emph_q15, &inst->mem_r, framelen);
-        pre_emphasis(&inBufMic[0], pre_emph_q15, &inst->mem_d, framelen);
+        // pre_emphasis(&refSignal[0], pre_emph_q15, &inst->mem_r, framelen);
+        // pre_emphasis(&inBufMic[0], pre_emph_q15, &inst->mem_d, framelen);
 
 #ifdef ENABLE_PROFILING
         end = clock();
@@ -2783,7 +2831,9 @@ void AEC_single_Proc(aecInst_t *aecInst, int16_t *inBufRef, int16_t *inBufMic, i
         // printf("refPower= %.2f, ",refPower);
         // NLMS 에코 캔슬러 실행
         // nlms_echo_canceller_two_path(inst, inBufRef, inBufMic, inst->weightsback,  inst->weightsfore, inst->leaky, errorSignal, inst->uBuf, refPower, &inst->prevAttenuation, framelen, updateon);
-        nlms_echo_canceller_two_path(inst, refSignal, inBufMic, inst->weightsback,  inst->weightsfore, inst->leaky, errorSignal, inst->uBuf, refPower, &inst->prevAttenuation, framelen, updateon);
+        // nlms_echo_canceller_two_path       (inst, refSignal, inBufMic, inst->weightsback,  inst->weightsfore, inst->leaky, errorSignal, inst->uBuf, refPower, &inst->prevAttenuation, framelen, updateon);
+        nlms_echo_canceller(inst, refSignal, inBufMic, inst->weightsback, inst->leaky, errorSignal, inst->uBuf, refPower, &inst->prevAttenuation, framelen, updateon);
+        // nlms_echo_canceller_two_path_strong(inst, refSignal, inBufMic, inst->weightsback,  inst->weightsfore, inst->leaky, errorSignal, inst->uBuf, refPower, &inst->prevAttenuation, framelen, updateon);
         // for (int i = 0; i < framelen; i++) {
         //     errorSignal[i] = inBufMic[i];
         // }
@@ -2854,7 +2904,7 @@ void AEC_single_Proc(aecInst_t *aecInst, int16_t *inBufRef, int16_t *inBufMic, i
         }
 
         // de_emphasis(&inBufRef[0], pre_emph_q15, &inst->mem_r_d, framelen);
-        de_emphasis(&inBufMic[0], pre_emph_q15, &inst->mem_d_d, framelen);
+        // de_emphasis(&inBufMic[0], pre_emph_q15, &inst->mem_d_d, framelen);
     }
 
 
@@ -3195,7 +3245,7 @@ void AEC_single_filter_load(aecInst_t *aecInst, float* filter, int filter_len, i
 // 크로스 코릴레이션을 사용하여 글로벌 딜레이를 계산하는 함수 (정수 연산)
 void calculate_global_delay(int16_t *refBuffer, int16_t *micBuffer, int framelen, long long *crossCorr, int *frameCount, int *estimatedDelay, int *delayinit, int *delayupdated) {
     // 각 프레임마다 크로스 코릴레이션 계산 (정수 연산)
-    for (int delay = -MAX_DELAY; delay <= 0; delay++) {
+    for (int delay = -MAX_DELAY; delay <= MAX_DELAY; delay++) {
         long long sum = 0;
         for (int i = 0; i < framelen; i++) {
             int refIndex = i;
@@ -3212,14 +3262,14 @@ void calculate_global_delay(int16_t *refBuffer, int16_t *micBuffer, int framelen
     (*frameCount)++;
 
     // 5초 동안 모든 프레임을 처리한 경우 최종 결과 계산
-    if (*frameCount >= (SAMPLE_RATE * 2 / framelen)) { // 5초 동안 모든 프레임 처리 완료
+    if (*frameCount >= (SAMPLE_RATE * 3 / framelen)) { // 5초 동안 모든 프레임 처리 완료
         long long maxCorr = LONG_LONG_MIN;
         int delay_result = 0;
         for (int delay = -MAX_DELAY; delay <= MAX_DELAY; delay++) {
             if ((crossCorr[delay + MAX_DELAY]) > maxCorr) {
                 maxCorr = (crossCorr[delay + MAX_DELAY]);
 
-                delay_result = delay+MAX_DELAY-100;
+                delay_result = delay+MAX_DELAY-50;
             }
         }
 
@@ -3229,11 +3279,11 @@ void calculate_global_delay(int16_t *refBuffer, int16_t *micBuffer, int framelen
             *delayupdated = 1;
         }
 
-        if (abs(delay_result-*estimatedDelay)>100) {
-            *estimatedDelay = delay_result;        
-            *delayupdated = 1;
-            *delayinit = 1;
-        }
+        // if (abs(delay_result-*estimatedDelay)>100) {
+        //     *estimatedDelay = delay_result;        
+        //     *delayupdated = 1;
+        //     *delayinit = 1;
+        // }
 
         printf("calculate_global_delay :: delay_result = %d, Estimated Global Delay: %d\n", delay_result, *estimatedDelay);        
             
