@@ -68,8 +68,8 @@ void DoDnsample(UpdamplerContext* pContext, short* pIn, short* pOut, unsigned sh
 
     k = 0;
 
-	printf(" ASPL DN sample order %d  %f %f",pContext->FilterOrder,pContext->FilterCoef[0],pContext->FilterCoef[pContext->FilterOrder-1]);
-	printf(" ASPL DN sample order %d  %f %f",pContext->FilterOrder,pContext->FilterWindow[0],pContext->FilterWindow[pContext->FilterOrder-1]);
+//		printf(" ASPL DN sample order %d  %f %f",pContext->FilterOrder,pContext->FilterCoef[0],pContext->FilterCoef[pContext->FilterOrder-1]);
+//		printf(" ASPL DN sample order %d  %f %f",pContext->FilterOrder,pContext->FilterWindow[0],pContext->FilterWindow[pContext->FilterOrder-1]);
 
 	
     for (i = 0; i < Sz; i++)

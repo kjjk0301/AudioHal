@@ -184,7 +184,7 @@ int aspl_NR_total_param_write_to_file(const char* file_path); // expert mode, �
 
 int aspl_NR_create_2mic(void* data); // 2mic NR 초기화 함수
 // int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double * pDoA); // 2mic NR 수행 함수, with Beamforming auto mode : 1 auto, 0 manual
-int aspl_NR_process_2mic(short* data, int16_t* ref, int len, int Beam1, int Beam_auto, double * pDoA, aspl_NR_CONFIG* config);
+int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double * pDoA, aspl_NR_CONFIG* config);
 
 int aspl_AEC_create(aspl_NR_CONFIG* config);
 int aspl_AEC_process_2ch(int16_t* data, int16_t* ref, int len, int aec_delay, float micscaledB, aspl_NR_CONFIG* config);

@@ -1361,7 +1361,7 @@ int aspl_AEC_filterload(aspl_NR_CONFIG* config){
     return aspl_RET_SUCCESS;
 }
 
-int aspl_NR_process_2mic(short* data, int16_t* ref, int len, int Beam1, int Beam_auto, double * pDoA, aspl_NR_CONFIG* config){    
+int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double * pDoA, aspl_NR_CONFIG* config){    
 
     int i, k, j, m, n;
     int j_max;
@@ -1372,8 +1372,7 @@ int aspl_NR_process_2mic(short* data, int16_t* ref, int len, int Beam1, int Beam
     short   *mics_in[IN_CHANNELS_2MIC];     /* pointers to microphone inputs */
 
     short   *vad_input[IN_CHANNELS_2MIC];
-    short   *inputbuf[IN_CHANNELS_2MIC];    
-    short   *refbuf;   
+    short   *inputbuf[IN_CHANNELS_2MIC];      
     short   *work_buf[WORK_CHANNELS_2MIC];     /* pointers to microphone inputs */    
 
     polyInst_t* polyInstp = Sys_Total_Inst.polyInst_p;
@@ -1404,30 +1403,12 @@ int aspl_NR_process_2mic(short* data, int16_t* ref, int len, int Beam1, int Beam
         return aspl_RET_FAIL;
     } 
 
-    // Total_Inst_t* Total_Instp = (void *)&Sys_Total_Inst;
-//	    aecInst_t* aecInstp[2];
-//	    aecInstp[0] = config_p->aecInst_p[0];
-//	    aecInstp[1] = config_p->aecInst_p[1];
-//		int16_t   *refs_in;     /* pointers to microphone inputs */
-//	
-//	    refs_in = (int16_t *)ref;
-//	
-//	    ///////////////////////////   DC rejection         ////////////////////////////////////////
-//	    for (int i = 0; i < len; i++) {
-//	        mics_in[0][i] = (int16_t)DC_rejection(&config_p->offset_Q15_L, mics_in[0][i], 5);
-//	        mics_in[1][i] = (int16_t)DC_rejection(&config_p->offset_Q15_R, mics_in[1][i], 5);
-//	        refs_in[i] = (int16_t)DC_rejection(&config_p->offset_Q15_ref, refs_in[i], 5);
-//	    }
-
     if (len<=CODEC_FRM_LEGNTH_MAX){
 
         for (k = 0; k < MULTI_INPUT_CHANNELS; k++) {
             memcpy(&g_codec_4mic_buf[k][CODEC_BUF_FRONT_LEGNTH],  &mics_in[k][0], sizeof(int16_t)*len);
             inputbuf[k] = (short *) &g_codec_4mic_buf[k][CODEC_BUF_FRONT_LEGNTH-sample_left];
-        }
-
-//	        memcpy(&g_codec_4mic_buf[MULTI_INPUT_CHANNELS][CODEC_BUF_FRONT_LEGNTH],  &refs_in[0], sizeof(int16_t)*len);
-//	        refbuf = (short *) &g_codec_4mic_buf[MULTI_INPUT_CHANNELS][CODEC_BUF_FRONT_LEGNTH-sample_left];        
+        }    
 
         j_max = (len+sample_left) / NUM_FRAMES;
 
@@ -1475,11 +1456,7 @@ int aspl_NR_process_2mic(short* data, int16_t* ref, int len, int Beam1, int Beam
             ssl_vad_process((vadInst_t*) vadInstp, &vad_input[0][m], &vad_pre[k], &vad_min[k], &vad_max[k], 0);
             vad_sum += vad_min[k];
             k++;
-        }
-	
-        // AGC_input_2ch(agcInstp, NUM_FRAMES, &vad_input[0][NUM_FRAMES/2], &vad_input[1][NUM_FRAMES/2], &vad_input[0][NUM_FRAMES/2], &vad_input[1][NUM_FRAMES/2], agcInstp->globalMakeupGain_dB, agcInstp->threshold_dBFS);
-	
-	
+        }	
 	
         k=0;
         for (m = ssl_blocksize/2 ; m<(NUM_FRAMES-ssl_blocksize) ; m=m+ssl_blocksize/2){
@@ -1496,7 +1473,7 @@ int aspl_NR_process_2mic(short* data, int16_t* ref, int len, int Beam1, int Beam
                 else if (g_DoA < 35.0) g_Beamno = 5;
                 else if (g_DoA < 50.0) g_Beamno = 6;
                 else if (g_DoA < 60.0) g_Beamno = 7;
-                else g_Beamno = 8;
+                else g_Beamno = 4;
 	
                 no_DoA_cnt = 0;
                 printf("\n*************************************************************************\r\n");
@@ -1568,14 +1545,6 @@ int aspl_NR_process_2mic(short* data, int16_t* ref, int len, int Beam1, int Beam
                 }
             }	
         }    
-	
-	
-    //     m=PolyL*2;
-    //     for (k=1 ; k<PolyM/2 ; k++){
-    //         sb_AEC_Proc(aecInstp, &fft_ref_mat[0][m], &fft_bf_mat[Beam1][m], &fft_out_mat[1][m], k);
-    // //		        sb_AEC_Proc(inst_p, &fft_ref_mat[0][m], &fft_in_mat[0][m], &fft_out_mat[m], k);
-    //         m=m+PolyL*2;
-    //     }
 	
 	
         if (Sys_Total_Inst.NS_enable==1){
@@ -1651,12 +1620,6 @@ int aspl_NR_process_2mic(short* data, int16_t* ref, int len, int Beam1, int Beam
             for (i=0; i<CODEC_BUF_FRONT_LEGNTH; i++) {
                 g_codec_4mic_buf[k][i] = g_codec_4mic_buf[k][len+i];
             }
-        }
-//	        for (i=0; i<len; i++) {
-//	            refs_in[i] = g_codec_4mic_buf[MULTI_INPUT_CHANNELS][i];
-//	        }
-        for (i=0; i<CODEC_BUF_FRONT_LEGNTH; i++) {
-                g_codec_4mic_buf[MULTI_INPUT_CHANNELS][i] = g_codec_4mic_buf[MULTI_INPUT_CHANNELS][len+i];
         }
     }           
 
