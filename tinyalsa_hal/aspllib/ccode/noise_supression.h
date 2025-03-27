@@ -33,29 +33,10 @@ typedef struct nsInst_s {
 
     int Ma_size;
 
-    // short       beta_e1;
-    // short       beta_e2;
-    // short       beta_r1;
-    // short       beta_r2;
-    // short       beta_f;
-    // short       beta_freq;
-    // short       beta_freq_high;    
-
-    // short       round_bit_e1;
-    // short       round_bit_e2;
-    // short       round_bit_r1;
-    // short       round_bit_r2;
-    // short       round_bit_f;
-    // short       round_bit_freq;
-    // short       round_bit_freq_high;
-
     short       beta_e_num[6];
     short       beta_e[6];
     short       round_bit_e[6];
     unsigned char gamma_inv_e[6];
-
-    // int Hmin_num[3];
-    // int Hmin[PolyM];
 
     short       beta_r_num[9];
     short       beta_r[9];
@@ -73,23 +54,24 @@ typedef struct nsInst_s {
     float			beta_low_ratio;
     float			beta_high_ratio;
 
-
     float max_att;
     float min_att;
     float high_att;
     float slope;
 
+    int32_t SEE[PolyM];
+    int32_t SBB[PolyM];
+    int32_t See_oct[22];
+    int32_t H_Q15_oct[22];
+    int32_t H_MAIN[PolyM];
+    int32_t Hmin[PolyM/2+1];
 } nsInst_t;
-
-
 
 nsInst_t* sysNSCreate();
 void NS_Init(void *nsInst);
-void NS_DeInit();
+void NS_DeInit(void **nsInst);
 void NS_process(void *nsInst, void *fft_in_mat, void *fft_buf_mat, void *fft_out_mat, int vad);
 void NS_oct_process(void *nsInst, void *fft_in_mat, void *fft_buf_mat, void *fft_out_mat, int vad);
 
-
-
-extern nsInst_t Sys_nsInst;
+// extern nsInst_t Sys_nsInst;
 #endif /* NOISE_SUPRESSION_H_ */

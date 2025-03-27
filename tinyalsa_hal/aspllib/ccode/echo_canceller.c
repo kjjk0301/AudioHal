@@ -17,12 +17,12 @@
 #define DEBUG_AEC
 
 #define FRAME_SIZE 1600 // 프레임 크기
-#define FILTER_LENGTH 600
+#define FILTER_LENGTH 1024
 #define FILTER_LENGTH2 600
 #define LEAKY_LENGTH 1500
-#define STEP_SIZE 1.0f // 스텝 사이즈 (부동소수점)
+#define STEP_SIZE 0.07f // 스텝 사이즈 (부동소수점)
 #define STEP_SIZE2 0.07f // 스텝 사이즈 (부동소수점)
-#define MIN_POWER -45.0f // dBFS 기준 최소 파워
+#define MIN_POWER -60.0f // dBFS 기준 최소 파워
 #define SAMPLE_RATE 16000 // 샘플링 주파수
 #define LONG_LONG_MIN (-9223372036854775807LL - 1) // 최소 long long 값 정의
 #define MAX_DELAY 200 // 최대 딜레이 범위 (±2000 샘플)
@@ -80,7 +80,10 @@
 
 void generate_pink_noise(float *noiseBuffer, int length, float noiseLevel);
 void add_comfort_noise(int16_t *signal, float *noise, int length, float noiseGainDbfs);
-void calc_prod(float * prod, float * weight, int32_t filt_len);
+int calc_prod(float * prod, float * weight, int32_t filt_len);
+int calc_prod_Q18(int32_t * prodQ15, int32_t * weightQ18, int32_t filt_len);
+
+static inline int32_t inner_prod(const int32_t *x, const int32_t *y, int len);
 
 aecInst_t* sysAECCreate(int channum)
 {
@@ -93,7 +96,7 @@ aecInst_t* sysAECCreate(int channum)
 
 void AEC_DeInit(aecInst_t *aecInst)
 {
-    aecInst_t *inst = aecInst;
+    aecInst_t *inst = (aecInst_t *)aecInst;
 
     if(inst) {
         if ((inst->d_buf_g) != NULL) // by skj
@@ -146,6 +149,12 @@ void AEC_DeInit(aecInst_t *aecInst)
         if (inst->prod != NULL)
             free(inst->prod);
 
+        if (inst->weightsQ18 != NULL)
+        free(inst->weightsQ18);
+        
+        if (inst->prodQ15 != NULL)
+        free(inst->prodQ15);            
+
         free(inst);
         inst = NULL;
         
@@ -156,6 +165,9 @@ void AEC_DeInit(aecInst_t *aecInst)
     debug_file_close();
 #endif
 }
+
+// int32_t weightsQ18[FILTER_LENGTH];
+// int32_t prodQ15[FILTER_LENGTH];
 
 void AEC_Init(aecInst_t *aecInst)
 {
@@ -278,6 +290,20 @@ void AEC_Init(aecInst_t *aecInst)
         perror("AEC_Init malloc fail: prod");
         return;
     }    
+
+    inst->weightsQ18 = (int32_t *)malloc(FILTER_LENGTH * sizeof(int32_t)); // by skj
+    if (inst->weightsQ18 == NULL)
+    {
+        perror("AEC_Init malloc fail: weightsQ18");
+        return;
+    }   
+    
+    inst->prodQ15 = (int32_t *)malloc(FILTER_LENGTH * sizeof(int32_t)); // by skj
+    if (inst->prodQ15 == NULL)
+    {
+        perror("AEC_Init malloc fail: prodQ15");
+        return;
+    }       
     ///////////////////////////////////////////////// malloc
 
     for (int i = 0; i < 256 * 2; i++)
@@ -299,15 +325,17 @@ void AEC_Init(aecInst_t *aecInst)
         inst->weightsfore[i] = 0.0f;
         inst->leaky[i] = 1.0;
         inst->prod[i] = 0.0;
+        inst->weightsQ18[i] = 0;
+        inst->prodQ15[i] = 0;
     }
 
-    // // 감소 비율 계산
-    // float decrement = (1.0f - 0.99999f) / (FILTER_LENGTH - LEAKY_LENGTH - 1);
+    // 감소 비율 계산
+    float decrement = (1.0f - 0.99999f) / (FILTER_LENGTH - LEAKY_LENGTH - 1);
 
     // leaky 계수를 1.0f에서 점진적으로 감소시키기
-    // for (int i = LEAKY_LENGTH; i < FILTER_LENGTH; i++) {
-    //     leaky[i] = 1.0f - decrement * (i - LEAKY_LENGTH);
-    // }  
+    for (int i = LEAKY_LENGTH; i < FILTER_LENGTH; i++) {
+        inst->leaky[i] = 1.0f - decrement * (i - LEAKY_LENGTH);
+    }  
 
     for (int i = 0; i < (FILTER_LENGTH + FRAME_SIZE - 1); i++)
     {
@@ -459,1935 +487,1938 @@ void smooth_normalize_signal_rms_int32(int16_t *signal, float rmsVal, int length
 #endif
 
 
-// NLMS 에코 캔슬러 함수 (필터 가중치 업데이트는 플로팅 연산)
-void nlms_echo_canceller_2ch_two_path(aecInst_t *aecInst, int16_t *refSignal, int16_t *micSignal, float *weights, float *weights_fore, float *leaky, int16_t *errorSignal, int32_t *x, float refPower, float *prevAttenuation, int length, int updateon) {
+// // NLMS 에코 캔슬러 함수 (필터 가중치 업데이트는 플로팅 연산)
+// void nlms_echo_canceller_2ch_two_path(aecInst_t *aecInst, int16_t *refSignal, int16_t *micSignal, float *weights, float *weights_fore, float *leaky, int16_t *errorSignal, int32_t *x, float refPower, float *prevAttenuation, int length, int updateon) {
     
-    aecInst_t *inst = (aecInst_t *)aecInst;
+//     aecInst_t *inst = (aecInst_t *)aecInst;
 
-    const float WEIGHT_THRESHOLD = 10.0f; // 필터 가중치의 상한 값
+//     const float WEIGHT_THRESHOLD = 10.0f; // 필터 가중치의 상한 값
 
-    int32_t weightsQ15[2][FILTER_LENGTH];
-    float weights_slow[2][FILTER_LENGTH];
-    float error_fore[2][FRAME_SIZE];
-    float error_back[2][FRAME_SIZE];
-    int32_t y_fore[2][FRAME_SIZE];
-    int32_t y_back[2][FRAME_SIZE];
+//     int32_t weightsQ15[2][FILTER_LENGTH];
+//     float weights_slow[2][FILTER_LENGTH];
+//     float error_fore[2][FRAME_SIZE];
+//     float error_back[2][FRAME_SIZE];
+//     int32_t y_fore[2][FRAME_SIZE];
+//     int32_t y_back[2][FRAME_SIZE];
 
-    float * trans_window = &inst->trans_window1024[0]; 
+//     float * trans_window = &inst->trans_window1024[0]; 
 
-    if (length == 1024) {
-        trans_window = &inst->trans_window1024[0];
-    } else if (length == 1600) {
-        trans_window = &inst->trans_window1600[0];
-    } else if (length == 512) {
-        trans_window = &inst->trans_window512[0];
-    } else {
+//     if (length == 1024) {
+//         trans_window = &inst->trans_window1024[0];
+//     } else if (length == 1600) {
+//         trans_window = &inst->trans_window1600[0];
+//     } else if (length == 512) {
+//         trans_window = &inst->trans_window512[0];
+//     } else {
 
-        for (int i = 0; i < length * 2; i++) {
-            inst->trans_window1600[i] = .5 - .5 * cos(2 * M_PI * i / (length * 2));        
-        }
+//         for (int i = 0; i < length * 2; i++) {
+//             inst->trans_window1600[i] = .5 - .5 * cos(2 * M_PI * i / (length * 2));        
+//         }
             
-        trans_window = &inst->trans_window1600[0];
-    }
-    // for (int i=0;i<length*2;i++)
-    //     trans_window[i] = .5-.5*cos(2*M_PI*i/(length*2));    
+//         trans_window = &inst->trans_window1600[0];
+//     }
+//     // for (int i=0;i<length*2;i++)
+//     //     trans_window[i] = .5-.5*cos(2*M_PI*i/(length*2));    
 
 
-    for (int n=0; n<FILTER_LENGTH-1; n++){
-        x[n]=x[n+length];
-    }
+//     for (int n=0; n<FILTER_LENGTH-1; n++){
+//         x[n]=x[n+length];
+//     }
 
-    for (int n=0; n<length; n++){
-        x[n+FILTER_LENGTH-1]=refSignal[n];
-    }
+//     for (int n=0; n<length; n++){
+//         x[n+FILTER_LENGTH-1]=refSignal[n];
+//     }
 
-    // Foreground filtering
-    for (int j = 0; j < 2 ; j++){
-        for (int i = 0; i < FILTER_LENGTH; i++) {
-            weightsQ15[j][i] = (int32_t)(weights_fore[i+j*FILTER_LENGTH] * 32768.0f);
-        }   
+//     // Foreground filtering
+//     for (int j = 0; j < 2 ; j++){
+//         for (int i = 0; i < FILTER_LENGTH; i++) {
+//             weightsQ15[j][i] = (int32_t)(weights_fore[i+j*FILTER_LENGTH] * 32768.0f);
+//         }   
 
-        for (int n = 0; n < length; n++) {
+//         for (int n = 0; n < length; n++) {
 
-            int curidx=FILTER_LENGTH-1+n;
+//             int curidx=FILTER_LENGTH-1+n;
         
-            int32_t y = 16384;
-            int m = curidx;
-            for (int i = 0; i < FILTER_LENGTH; i++) {
-                y += (weightsQ15[j][i] * x[m]);
-                m--;
-            }
+//             int32_t y = 16384;
+//             int m = curidx;
+//             for (int i = 0; i < FILTER_LENGTH; i++) {
+//                 y += (weightsQ15[j][i] * x[m]);
+//                 m--;
+//             }
 
-            y = y>>15;
+//             y = y>>15;
 
-            y_fore[j][n] = y;
+//             y_fore[j][n] = y;
 
-            // 잔차 신호 계산
-            float e = (float)micSignal[n+j*length] -  (float)y;
-            error_fore[j][n] = e;
-        }
-    }
+//             // 잔차 신호 계산
+//             float e = (float)micSignal[n+j*length] -  (float)y;
+//             error_fore[j][n] = e;
+//         }
+//     }
 
-    // Calc foreground filter residual power
-    float Sff = 0.0f;
-    for (int j = 0; j < 2 ; j++){
-        for (int n = 0; n < length; n++) {
-            Sff += error_fore[j][n] * error_fore[j][n];
-        }
-    }
+//     // Calc foreground filter residual power
+//     float Sff = 0.0f;
+//     for (int j = 0; j < 2 ; j++){
+//         for (int n = 0; n < length; n++) {
+//             Sff += error_fore[j][n] * error_fore[j][n];
+//         }
+//     }
 
-    float normFactor = 500.0f;
-    for (int n=0; n<FILTER_LENGTH; n++){
-        normFactor += (float)((int32_t)x[n+length-1] * (int32_t)x[n+length-1]);
-    }
+//     float normFactor = 500.0f;
+//     for (int n=0; n<FILTER_LENGTH; n++){
+//         normFactor += (float)((int32_t)x[n+length-1] * (int32_t)x[n+length-1]);
+//     }
     
-    // Calc foreground filter residual power
-    float Sxx = 0.0f;
-    for (int n = 0; n < length; n++) {
-        Sxx += (float)((int32_t)refSignal[n] * (int32_t)refSignal[n]);
-    }
+//     // Calc foreground filter residual power
+//     float Sxx = 0.0f;
+//     for (int n = 0; n < length; n++) {
+//         Sxx += (float)((int32_t)refSignal[n] * (int32_t)refSignal[n]);
+//     }
 
-    // Calc foreground filter residual power
-    float Sdd = 0.0f;
-    for (int j = 0; j < 2 ; j++){
-        for (int n = 0; n < length; n++) {
-            Sdd += (float)((int32_t)micSignal[n+j*length] * (int32_t)micSignal[n+j*length]);
-        }
-    }
-    float micPower = sqrtf(Sdd / (float)length / 2.0f);
+//     // Calc foreground filter residual power
+//     float Sdd = 0.0f;
+//     for (int j = 0; j < 2 ; j++){
+//         for (int n = 0; n < length; n++) {
+//             Sdd += (float)((int32_t)micSignal[n+j*length] * (int32_t)micSignal[n+j*length]);
+//         }
+//     }
+//     float micPower = sqrtf(Sdd / (float)length / 2.0f);
 
-    float step_size1000 = STEP_SIZE * 10000;
+//     float step_size1000 = STEP_SIZE * 10000;
 
-    float mu;
-    // 스텝 크기 조정
-    if (updateon==1) {
-        if (*prevAttenuation > 25.0f || refPower < -50.0f){
-            mu = 0.1f * step_size1000 / normFactor;
-        } else if (inst->adapted){
-            mu = 0.5f * step_size1000 / normFactor;
-        }
-        // mu = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? 0.1f * step_size1000 / normFactor : step_size1000 / normFactor;
-        // n_mu_Q28 = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? n_mu_Q28>>3 : n_mu_Q28;
-    } else {
-        mu = 0.05f * step_size1000 / normFactor;
-        // n_mu_Q28 = n_mu_Q28>>3;        
-    }
-    // printf("normFactor=%f mu=%f\r\n", normFactor, mu);
+//     float mu;
+//     // 스텝 크기 조정
+//     if (updateon==1) {
+//         if (*prevAttenuation > 25.0f || refPower < -50.0f){
+//             mu = 0.1f * step_size1000 / normFactor;
+//         } else if (inst->adapted){
+//             mu = 0.5f * step_size1000 / normFactor;
+//         }
+//         // mu = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? 0.1f * step_size1000 / normFactor : step_size1000 / normFactor;
+//         // n_mu_Q28 = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? n_mu_Q28>>3 : n_mu_Q28;
+//     } else {
+//         mu = 0.05f * step_size1000 / normFactor;
+//         // n_mu_Q28 = n_mu_Q28>>3;        
+//     }
+//     // printf("normFactor=%f mu=%f\r\n", normFactor, mu);
 
-    float Attenuationtmp = *prevAttenuation;
+//     float Attenuationtmp = *prevAttenuation;
 
-    int itermax = 1;
-    // if (inst->adapted==0 && Attenuationtmp <= 20.0f){
-    //     // if (refPower > -30.0f ){
-    //         itermax = 5;
-    //     //     printf("itermax = 5\r\n");
-    //     // } else if (refPower > -40.0f ){
-    //     //     itermax = 4;
-    //     //     printf("itermax = 4\r\n");
-    //     // } else {
-    //     //     itermax = 3;
-    //     //     printf("itermax = 3\r\n");
-    //     // }
-    // }
+//     int itermax = 1;
+//     // if (inst->adapted==0 && Attenuationtmp <= 20.0f){
+//     //     // if (refPower > -30.0f ){
+//     //         itermax = 5;
+//     //     //     printf("itermax = 5\r\n");
+//     //     // } else if (refPower > -40.0f ){
+//     //     //     itermax = 4;
+//     //     //     printf("itermax = 4\r\n");
+//     //     // } else {
+//     //     //     itermax = 3;
+//     //     //     printf("itermax = 3\r\n");
+//     //     // }
+//     // }
 
-    for (int j = 0; j < 2 ; j++){
-        for (int i = 0; i < FILTER_LENGTH; i++) {
-            weights_slow[j][i] = weights[i+j*FILTER_LENGTH];
-        }
-    }
+//     for (int j = 0; j < 2 ; j++){
+//         for (int i = 0; i < FILTER_LENGTH; i++) {
+//             weights_slow[j][i] = weights[i+j*FILTER_LENGTH];
+//         }
+//     }
 
-    float See = 0.0f;
-    for (int m=0; m<itermax; m++){
-        for (int j = 0; j < 2 ; j++){
-            for (int n = 0; n < length; n++) {
+//     float See = 0.0f;
+//     for (int m=0; m<itermax; m++){
+//         for (int j = 0; j < 2 ; j++){
+//             for (int n = 0; n < length; n++) {
 
-                int curidx=FILTER_LENGTH-1+n;
+//                 int curidx=FILTER_LENGTH-1+n;
 
-                for (int i = 0; i < FILTER_LENGTH; i++) {
-                    weightsQ15[j][i] = (int32_t)(weights[i+j*FILTER_LENGTH] * 32768.0f);
-                }            
+//                 for (int i = 0; i < FILTER_LENGTH; i++) {
+//                     weightsQ15[j][i] = (int32_t)(weights[i+j*FILTER_LENGTH] * 32768.0f);
+//                 }            
 
-                int32_t y = 16384;
-                    int m = curidx;
-                for (int i = 0; i < FILTER_LENGTH; i++) {
-                        y += (weightsQ15[j][i] * x[m]);
-                        m--;
-                }
+//                 int32_t y = 16384;
+//                     int m = curidx;
+//                 for (int i = 0; i < FILTER_LENGTH; i++) {
+//                         y += (weightsQ15[j][i] * x[m]);
+//                         m--;
+//                 }
 
-                y = y>>15;
+//                 y = y>>15;
 
-                y_back[j][n] = y;
+//                 y_back[j][n] = y;
 
-                // 잔차 신호 계산
-                float e = (float)(micSignal[n+j*length] -  y);
-                error_back[j][n] = e;
-                // errorSignal[n]=(int16_t)e;
+//                 // 잔차 신호 계산
+//                 float e = (float)(micSignal[n+j*length] -  y);
+//                 error_back[j][n] = e;
+//                 // errorSignal[n]=(int16_t)e;
 
-                if (updateon==1) {
-                    float e_mu_temp = mu * e;
-                    m = curidx;
-                    for (int i = 0; i < FILTER_LENGTH; i++) {
-                        weights[i+j*FILTER_LENGTH] = weights[i+j*FILTER_LENGTH] + e_mu_temp * (float)x[m];
-                        m--;
-                    }
-                }
-            }
+//                 if (updateon==1) {
+//                     float e_mu_temp = mu * e;
+//                     m = curidx;
+//                     for (int i = 0; i < FILTER_LENGTH; i++) {
+//                         weights[i+j*FILTER_LENGTH] = weights[i+j*FILTER_LENGTH] + e_mu_temp * (float)x[m];
+//                         m--;
+//                     }
+//                 }
+//             }
 
-            for (int i = 0; i < FILTER_LENGTH; i++) {
-                weights_slow[j][i] = weights_slow[j][i] * 0.99 + weights[i+j*FILTER_LENGTH] * 0.01;
-            } 
-        }                   
+//             for (int i = 0; i < FILTER_LENGTH; i++) {
+//                 weights_slow[j][i] = weights_slow[j][i] * 0.99 + weights[i+j*FILTER_LENGTH] * 0.01;
+//             } 
+//         }                   
 
-            // mu *= 0.7;s
+//             // mu *= 0.7;s
 
-        // Calc foreground filter residual power
-        See = 0.0f;
-        for (int j = 0; j < 2 ; j++){
-            for (int n = 0; n < length; n++) {
-                See += error_back[j][n] * error_back[j][n];
-            }
-        }
+//         // Calc foreground filter residual power
+//         See = 0.0f;
+//         for (int j = 0; j < 2 ; j++){
+//             for (int n = 0; n < length; n++) {
+//                 See += error_back[j][n] * error_back[j][n];
+//             }
+//         }
 
-        float errorPowertemp = sqrtf(See / (float)length / 2.0f);
-        Attenuationtmp = 20.0f * log10f(micPower / (errorPowertemp + 1));  
+//         float errorPowertemp = sqrtf(See / (float)length / 2.0f);
+//         Attenuationtmp = 20.0f * log10f(micPower / (errorPowertemp + 1));  
 
-        if (Attenuationtmp>20.0f) break;
+//         if (Attenuationtmp>20.0f) break;
 
-    }    
+//     }    
 
-    int32_t dbf[2][FRAME_SIZE];
-    // Calc power of Difference in response
-    for (int j = 0; j < 2 ; j++){
-        for (int n = 0; n < length; n++) {
-            dbf[j][n]=y_fore[j][n]-y_back[j][n];
-        }
-    }
+//     int32_t dbf[2][FRAME_SIZE];
+//     // Calc power of Difference in response
+//     for (int j = 0; j < 2 ; j++){
+//         for (int n = 0; n < length; n++) {
+//             dbf[j][n]=y_fore[j][n]-y_back[j][n];
+//         }
+//     }
 
-    float Dbf = 0.0f;
-    for (int j = 0; j < 2 ; j++){
-        for (int n = 0; n < length; n++) {
-            Dbf += (float)dbf[j][n] * (float)dbf[j][n];
-        }
-    }
+//     float Dbf = 0.0f;
+//     for (int j = 0; j < 2 ; j++){
+//         for (int n = 0; n < length; n++) {
+//             Dbf += (float)dbf[j][n] * (float)dbf[j][n];
+//         }
+//     }
 
-    inst->Davg1 = .6*inst->Davg1 + .4*(Sff-See);
-    inst->Davg2 = .85*inst->Davg2 + .15*(Sff-See);
-    inst->Dvar1 = .36*inst->Dvar1 + .16*Sff*Dbf;
-    inst->Dvar2 = .7225*inst->Dvar2 + .0225*Sff*Dbf;
+//     inst->Davg1 = .6*inst->Davg1 + .4*(Sff-See);
+//     inst->Davg2 = .85*inst->Davg2 + .15*(Sff-See);
+//     inst->Dvar1 = .36*inst->Dvar1 + .16*Sff*Dbf;
+//     inst->Dvar2 = .7225*inst->Dvar2 + .0225*Sff*Dbf;
 
-    inst->update_fore = 0;
-    if ((Sff-See)*fabsf(Sff-See) > Sff*Dbf) inst->update_fore = 1;
-    if ((inst->Davg1)*fabsf(inst->Davg1) > 0.5*inst->Dvar1) inst->update_fore = 2;
-    if ((inst->Davg2)*fabsf(inst->Davg2) > 0.25*inst->Dvar2) inst->update_fore = 3;
+//     inst->update_fore = 0;
+//     if ((Sff-See)*fabsf(Sff-See) > Sff*Dbf) inst->update_fore = 1;
+//     if ((inst->Davg1)*fabsf(inst->Davg1) > 0.5*inst->Dvar1) inst->update_fore = 2;
+//     if ((inst->Davg2)*fabsf(inst->Davg2) > 0.25*inst->Dvar2) inst->update_fore = 3;
 
-    for (int j = 0; j < 2 ; j++){
-        for (int n = 0; n < length; n++) {
-            errorSignal[n+j*length]=(int16_t)error_fore[j][n];
-        }
-    }
+//     for (int j = 0; j < 2 ; j++){
+//         for (int n = 0; n < length; n++) {
+//             errorSignal[n+j*length]=(int16_t)error_fore[j][n];
+//         }
+//     }
 
     
-    if (inst->update_fore) {
+//     if (inst->update_fore) {
 
-        for (int j = 0; j < 2 ; j++){
-            for (int i = 0; i < FILTER_LENGTH; i++) {
-                // weights_fore[i] = weights_fore[i]*0.75 + weights[i]* 0.25; // 필터 계수를 0으로 초기화
-                // weights_fore[i] = weights[i];
-                weights_fore[i+j*FILTER_LENGTH] = weights_slow[j][i];
-            }
+//         for (int j = 0; j < 2 ; j++){
+//             for (int i = 0; i < FILTER_LENGTH; i++) {
+//                 // weights_fore[i] = weights_fore[i]*0.75 + weights[i]* 0.25; // 필터 계수를 0으로 초기화
+//                 // weights_fore[i] = weights[i];
+//                 weights_fore[i+j*FILTER_LENGTH] = weights_slow[j][i];
+//             }
             
-            for (int i = 0; i < FILTER_LENGTH; i++) {
-                weightsQ15[j][i] = (int32_t)(weights[i+j*FILTER_LENGTH] * 32768.0f);
-            }            
-        }
+//             for (int i = 0; i < FILTER_LENGTH; i++) {
+//                 weightsQ15[j][i] = (int32_t)(weights[i+j*FILTER_LENGTH] * 32768.0f);
+//             }            
+//         }
 
-        inst->Davg1 = 0.0;
-        inst->Davg2 = 0.0;
-        inst->Dvar1 = 0.0;
-        inst->Dvar2 = 0.0;         
+//         inst->Davg1 = 0.0;
+//         inst->Davg2 = 0.0;
+//         inst->Dvar1 = 0.0;
+//         inst->Dvar2 = 0.0;         
 
-        for (int j = 0; j < 2 ; j++){
-            for (int n = 0; n < length; n++) {
-                errorSignal[n+j*length]=(int16_t)((float)micSignal[n+j*length] - ((float)y_back[j][n]*trans_window[n] + (float)y_fore[j][n]*trans_window[n+length]));
-                // errorSignal[n]=(int16_t)error_back[n];
-            }
-        // printf("update fore\n");
-        }
+//         for (int j = 0; j < 2 ; j++){
+//             for (int n = 0; n < length; n++) {
+//                 errorSignal[n+j*length]=(int16_t)((float)micSignal[n+j*length] - ((float)y_back[j][n]*trans_window[n] + (float)y_fore[j][n]*trans_window[n+length]));
+//                 // errorSignal[n]=(int16_t)error_back[n];
+//             }
+//         // printf("update fore\n");
+//         }
 
-        } else {
-        int reset_back = 0;
-        if (-1.0*(Sff-See)*fabsf(Sff-See) > 4.0*Sff*Dbf) reset_back = 1;
-        if (-1.0*(inst->Davg1)*fabsf(inst->Davg1) > 4.0*inst->Dvar1) reset_back = 1;
-        if (-1.0*(inst->Davg2)*fabsf(inst->Davg2) > 4.0*inst->Dvar2) reset_back = 1;
+//         } else {
+//         int reset_back = 0;
+//         if (-1.0*(Sff-See)*fabsf(Sff-See) > 4.0*Sff*Dbf) reset_back = 1;
+//         if (-1.0*(inst->Davg1)*fabsf(inst->Davg1) > 4.0*inst->Dvar1) reset_back = 1;
+//         if (-1.0*(inst->Davg2)*fabsf(inst->Davg2) > 4.0*inst->Dvar2) reset_back = 1;
 
 
-        if (reset_back) {
-            for (int j = 0; j < 2 ; j++){
-                for (int i = 0; i < FILTER_LENGTH; i++) {
-                    weights[i+j*FILTER_LENGTH] = weights_fore[i+j*FILTER_LENGTH];
-                }
-            }
+//         if (reset_back) {
+//             for (int j = 0; j < 2 ; j++){
+//                 for (int i = 0; i < FILTER_LENGTH; i++) {
+//                     weights[i+j*FILTER_LENGTH] = weights_fore[i+j*FILTER_LENGTH];
+//                 }
+//             }
 
-            See = Sff;
-            inst->Davg1 = 0.0;
-            inst->Davg2 = 0.0;
-            inst->Dvar1 = 0.0;
-            inst->Dvar2 = 0.0;
+//             See = Sff;
+//             inst->Davg1 = 0.0;
+//             inst->Davg2 = 0.0;
+//             inst->Dvar1 = 0.0;
+//             inst->Dvar2 = 0.0;
 
-            for (int j = 0; j < 2 ; j++){
-                for (int i = 0; i < FILTER_LENGTH; i++) {
-                    weightsQ15[j][i] = (int32_t)(weights[i+j*FILTER_LENGTH] * 32768.0f);
-                }                
-            }
+//             for (int j = 0; j < 2 ; j++){
+//                 for (int i = 0; i < FILTER_LENGTH; i++) {
+//                     weightsQ15[j][i] = (int32_t)(weights[i+j*FILTER_LENGTH] * 32768.0f);
+//                 }                
+//             }
 
-            // printf("reset back\n");
-        }  else {
-            for (int j = 0; j < 2 ; j++){
-                for (int i = 0; i < FILTER_LENGTH; i++) {
-                    weightsQ15[j][i] = (int32_t)(weights_fore[i+j*FILTER_LENGTH] * 32768.0f);
-                }            
-            }
-            // printf("just go\n");
-        }
-    }
+//             // printf("reset back\n");
+//         }  else {
+//             for (int j = 0; j < 2 ; j++){
+//                 for (int i = 0; i < FILTER_LENGTH; i++) {
+//                     weightsQ15[j][i] = (int32_t)(weights_fore[i+j*FILTER_LENGTH] * 32768.0f);
+//                 }            
+//             }
+//             // printf("just go\n");
+//         }
+//     }
 
-    // 필터 계수 발산 방지
-    int resetWeights = 0; // 초기값: 0 (거짓)
-    for (int j = 0; j < 2 ; j++){
-        for (int i = 0; i < FILTER_LENGTH; i++) {
-            if (fabs(weights[i+j*FILTER_LENGTH]) > WEIGHT_THRESHOLD || isnan(weights[i])) {
-                resetWeights = 1; // 참
-                break;
-            }
-        }
-    }
-    if (resetWeights) {
-        for (int j = 0; j < 2 ; j++){
-            for (int i = 0; i < FILTER_LENGTH; i++) {
-                weights[i+j*FILTER_LENGTH] = 0.0f; // 필터 계수를 0으로 초기화
-            }
-        }
-        inst->adapted = 0;
-        inst->sum_adapt = 0;
-        printf("Weights reset to prevent divergence.\n");
-    }
+//     // 필터 계수 발산 방지
+//     int resetWeights = 0; // 초기값: 0 (거짓)
+//     for (int j = 0; j < 2 ; j++){
+//         for (int i = 0; i < FILTER_LENGTH; i++) {
+//             if (fabs(weights[i+j*FILTER_LENGTH]) > WEIGHT_THRESHOLD || isnan(weights[i])) {
+//                 resetWeights = 1; // 참
+//                 break;
+//             }
+//         }
+//     }
+//     if (resetWeights) {
+//         for (int j = 0; j < 2 ; j++){
+//             for (int i = 0; i < FILTER_LENGTH; i++) {
+//                 weights[i+j*FILTER_LENGTH] = 0.0f; // 필터 계수를 0으로 초기화
+//             }
+//         }
+//         inst->adapted = 0;
+//         inst->sum_adapt = 0;
+//         printf("Weights reset to prevent divergence.\n");
+//     }
 
-    // 감쇄량 계산
+//     // 감쇄량 계산
 
-    float errorPower = calculate_rms_int32((int16_t *)errorSignal, length * 2);
-    // prevAttenuation_ratio = 0.7 * prevAttenuation_ratio + 0.3 * (micPower / (errorPower + 1));
-    // *prevAttenuation = 20.0f * log10f(prevAttenuation_ratio);
-    *prevAttenuation = 20.0f * log10f(micPower / (errorPower + 1));
-    // printf("micPower= %.2f, errorPower=%.2f, Attenuation = %.2f updateon=%d\n",20.0f * log10f(micPower)-90.3f, 20.0f * log10f(errorPower)-90.3f, *prevAttenuation, updateon);
+//     float errorPower = calculate_rms_int32((int16_t *)errorSignal, length * 2);
+//     // prevAttenuation_ratio = 0.7 * prevAttenuation_ratio + 0.3 * (micPower / (errorPower + 1));
+//     // *prevAttenuation = 20.0f * log10f(prevAttenuation_ratio);
+//     *prevAttenuation = 20.0f * log10f(micPower / (errorPower + 1));
+//     // printf("micPower= %.2f, errorPower=%.2f, Attenuation = %.2f updateon=%d\n",20.0f * log10f(micPower)-90.3f, 20.0f * log10f(errorPower)-90.3f, *prevAttenuation, updateon);
 
-    if (updateon==1) {
-        float tmp = Sxx;
-        if (tmp>See){
-            tmp = See;
-        }
-        inst->adapt_rate = 0.25* tmp / (See+1);
-        inst->sum_adapt += inst->adapt_rate;
-    }
+//     if (updateon==1) {
+//         float tmp = Sxx;
+//         if (tmp>See){
+//             tmp = See;
+//         }
+//         inst->adapt_rate = 0.25* tmp / (See+1);
+//         inst->sum_adapt += inst->adapt_rate;
+//     }
 
-    if (!inst->adapted && inst->sum_adapt > 7 && *prevAttenuation > 20.0f)
-    {    
-        inst->adapted = 1;
-    }
-#ifdef DEBUG_AEC
-	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
+//     if (!inst->adapted && inst->sum_adapt > 7 && *prevAttenuation > 20.0f)
+//     {    
+//         inst->adapted = 1;
+//     }
+// #ifdef DEBUG_AEC
+// 	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
        
-        FloatPacket packet;
-        // packet.val1 = (float)((Sff-See)*fabsf(Sff-See));
-        // packet.val2 = (float)(Sff*Dbf);
-        // packet.val3 = (float)((Davg1)*fabsf(Davg1));
-        // packet.val4 = (float)(0.5*Dvar1);
-        // packet.val5 = (float)((Davg2)*fabsf(Davg2));
-        // packet.val6 = (float)(0.25*Dvar2);
+//         FloatPacket packet;
+//         // packet.val1 = (float)((Sff-See)*fabsf(Sff-See));
+//         // packet.val2 = (float)(Sff*Dbf);
+//         // packet.val3 = (float)((Davg1)*fabsf(Davg1));
+//         // packet.val4 = (float)(0.5*Dvar1);
+//         // packet.val5 = (float)((Davg2)*fabsf(Davg2));
+//         // packet.val6 = (float)(0.25*Dvar2);
 
-        packet.val1 = (float)calculate_rms_int32((int16_t *)refSignal, length);
-        packet.val2 = (float)micPower;
-        packet.val3 = (float)micPower;
-        packet.val4 = (float)errorPower;
-        packet.val5 = (float)inst->sum_adapt;
-        packet.val6 = (float)inst->adapt_rate;      
+//         packet.val1 = (float)calculate_rms_int32((int16_t *)refSignal, length);
+//         packet.val2 = (float)micPower;
+//         packet.val3 = (float)micPower;
+//         packet.val4 = (float)errorPower;
+//         packet.val5 = (float)inst->sum_adapt;
+//         packet.val6 = (float)inst->adapt_rate;      
 
-        debug_matlab_ssl_float_packet_send(8, packet);
-        debug_matlab_int_array_send(9, &weightsQ15[0][0], FILTER_LENGTH);
-        debug_matlab_ssl_float_send(10, (*prevAttenuation));
-        // debug_matlab_ssl_float_send(10, (Dbf));
-    }
+//         debug_matlab_ssl_float_packet_send(8, packet);
+//         debug_matlab_int_array_send(9, &weightsQ15[0][0], FILTER_LENGTH);
+//         debug_matlab_ssl_float_send(10, (*prevAttenuation));
+//         // debug_matlab_ssl_float_send(10, (Dbf));
+//     }
 
-	if ((g_aec_debug_on==1)&&(inst->chan_num==0)){
-		g_aec_debug_snd_idx++;
-		if (g_aec_debug_snd_idx>=g_aec_debug_snd_period) {
-			g_aec_debug_snd_idx = 0;
-		}
-	}
-#endif 
+// 	if ((g_aec_debug_on==1)&&(inst->chan_num==0)){
+// 		g_aec_debug_snd_idx++;
+// 		if (g_aec_debug_snd_idx>=g_aec_debug_snd_period) {
+// 			g_aec_debug_snd_idx = 0;
+// 		}
+// 	}
+// #endif 
 
-}
+// }
 
-// NLMS 에코 캔슬러 함수 (필터 가중치 업데이트는 플로팅 연산)
-void nlms_echo_canceller_two_path(aecInst_t *aecInst, int16_t *refSignal, int16_t *micSignal, float *weights, float *weights_fore, float *leaky, int16_t *errorSignal, int32_t *x, float refPower, float *prevAttenuation, int length, int updateon) {
+// // NLMS 에코 캔슬러 함수 (필터 가중치 업데이트는 플로팅 연산)
+// void nlms_echo_canceller_two_path(aecInst_t *aecInst, int16_t *refSignal, int16_t *micSignal, float *weights, float *weights_fore, float *leaky, int16_t *errorSignal, int32_t *x, float refPower, float *prevAttenuation, int length, int updateon) {
 
-    aecInst_t *inst = (aecInst_t *)aecInst;
+//     aecInst_t *inst = (aecInst_t *)aecInst;
 
-    const float WEIGHT_THRESHOLD = 10.0f; // 필터 가중치의 상한 값
+//     const float WEIGHT_THRESHOLD = 10.0f; // 필터 가중치의 상한 값
 
-    int32_t weightsQ15[FILTER_LENGTH];
-    int32_t error_fore[FRAME_SIZE];
-    int32_t error_back[FRAME_SIZE];
-    int32_t y_fore[FRAME_SIZE];
-    int32_t y_back[FRAME_SIZE];
-    float * trans_window = &inst->trans_window1024[0];
+//     int32_t weightsQ15[FILTER_LENGTH];
+//     int32_t error_fore[FRAME_SIZE];
+//     int32_t error_back[FRAME_SIZE];
+//     int32_t y_fore[FRAME_SIZE];
+//     int32_t y_back[FRAME_SIZE];
+//     float * trans_window = &inst->trans_window1024[0];
 
-    float weights_slow[FILTER_LENGTH];
-    float e_mu_temp = 0;
-#ifdef fixed_point_aec    
-    int32_t n_x_Q15[FILTER_LENGTH];
-    int32_t n_e_mu_Q23 = 0;
-#endif
-
-
-    if (length == 1024) {
-        trans_window = &inst->trans_window1024[0];
-    } else if (length == 1600) {
-        trans_window = &inst->trans_window1600[0];
-    } else if (length == 512) {
-        trans_window = &inst->trans_window512[0];
-    } else if (length == 256) {
-        trans_window = &inst->trans_window256[0];        
-    } else {
-        for (int i = 0; i < length * 2; i++) {
-            inst->trans_window1600[i] = .5 - .5 * cos(2 * M_PI * i / (length * 2));        
-        }           
-        trans_window = &inst->trans_window1600[0];
-    }
-
-#ifdef ENABLE_PROFILING2
-        total_start = clock();
-#endif
-
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif          
-
-    for (int n=0; n<FILTER_LENGTH-1; n++){
-        x[n]=x[n+length];
-    }
-
-    for (int n=0; n<length; n++){
-        x[n+FILTER_LENGTH-1]=refSignal[n];
-    }
-
-    // Foreground filtering
-    for (int i = 0; i < FILTER_LENGTH; i++) {
-        weightsQ15[i] = (int32_t)(weights_fore[i] * 32768.0f);
-    }    
+//     float weights_slow[FILTER_LENGTH];
+//     float e_mu_temp = 0;
+// #ifdef fixed_point_aec    
+//     int32_t n_x_Q15[FILTER_LENGTH];
+//     int32_t n_e_mu_Q23 = 0;
+// #endif
 
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[0] += stepTime;
+//     if (length == 1024) {
+//         trans_window = &inst->trans_window1024[0];
+//     } else if (length == 1600) {
+//         trans_window = &inst->trans_window1600[0];
+//     } else if (length == 512) {
+//         trans_window = &inst->trans_window512[0];
+//     } else if (length == 256) {
+//         trans_window = &inst->trans_window256[0];        
+//     } else {
+//         for (int i = 0; i < length * 2; i++) {
+//             inst->trans_window1600[i] = .5 - .5 * cos(2 * M_PI * i / (length * 2));        
+//         }           
+//         trans_window = &inst->trans_window1600[0];
+//     }
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+// #ifdef ENABLE_PROFILING2
+//         total_start = clock();
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif          
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif          
 
-    for (int n = 0; n < length; n++) {
+//     for (int n=0; n<FILTER_LENGTH-1; n++){
+//         x[n]=x[n+length];
+//     }
 
-        int curidx=FILTER_LENGTH-1+n;
+//     for (int n=0; n<length; n++){
+//         x[n+FILTER_LENGTH-1]=refSignal[n];
+//     }
+
+//     // Foreground filtering
+//     for (int i = 0; i < FILTER_LENGTH; i++) {
+//         weightsQ15[i] = (int32_t)(weights_fore[i] * 32768.0f);
+//     }    
+
+
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[0] += stepTime;
+
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
+
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif          
+
+//     for (int n = 0; n < length; n++) {
+
+//         int curidx=FILTER_LENGTH-1+n;
        
-        int32_t y = 16384;
-        int m = curidx;
-        for (int i = 0; i < FILTER_LENGTH; i++) {
-            y += (weightsQ15[i] * x[m--]);
-            // m--;
-        }
+//         int32_t y = 16384;
+//         int m = curidx;
+//         for (int i = 0; i < FILTER_LENGTH; i++) {
+//             y += (weightsQ15[i] * x[m--]);
+//             // m--;
+//         }
 
-        y = y>>15;
+//         y = y>>15;
 
-        y_fore[n] = y;
+//         y_fore[n] = y;
 
-        // 잔차 신호 계산
-        int32_t e = (micSignal[n] -  y);
-        error_fore[n] = e;
-    }
+//         // 잔차 신호 계산
+//         int32_t e = (micSignal[n] -  y);
+//         error_fore[n] = e;
+//     }
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[1] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[1] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif          
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif          
 
-    // Calc foreground filter residual power
-    float Sff = 0.0f;
-    for (int n = 0; n < length; n++) {
-        Sff += (float)(error_fore[n] * error_fore[n]);
-    }
+//     // Calc foreground filter residual power
+//     float Sff = 0.0f;
+//     for (int n = 0; n < length; n++) {
+//         Sff += (float)(error_fore[n] * error_fore[n]);
+//     }
 
-    // Calc foreground filter residual power
-    float Sxx = 0.0f;
-    for (int n = 0; n < length; n++) {
-        Sxx += (float)((int32_t)refSignal[n] * (int32_t)refSignal[n]);
-    }
+//     // Calc foreground filter residual power
+//     float Sxx = 0.0f;
+//     for (int n = 0; n < length; n++) {
+//         Sxx += (float)((int32_t)refSignal[n] * (int32_t)refSignal[n]);
+//     }
 
-    // Calc foreground filter residual power
-    float Sdd = 0.0f;
-    for (int n = 0; n < length; n++) {
-        Sdd += (float)((int32_t)micSignal[n] * (int32_t)micSignal[n]);
-    }
-    float micPower = sqrtf(Sdd / (float)length);
+//     // Calc foreground filter residual power
+//     float Sdd = 0.0f;
+//     for (int n = 0; n < length; n++) {
+//         Sdd += (float)((int32_t)micSignal[n] * (int32_t)micSignal[n]);
+//     }
+//     float micPower = sqrtf(Sdd / (float)length);
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[2] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[2] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif      
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif      
 
-    float normFactor = 500.0f;
-    for (int n=0; n<FILTER_LENGTH; n++){
-        normFactor += (float)(x[n+length-1] * x[n+length-1]);
-    }
+//     float normFactor = 500.0f;
+//     for (int n=0; n<FILTER_LENGTH; n++){
+//         normFactor += (float)(x[n+length-1] * x[n+length-1]);
+//     }
 
-#ifdef fixed_point_aec
-    int32_t half_normFactor = 3000;
-    for (int n=0; n<FILTER_LENGTH; n++){
-        half_normFactor += abs(x[n+length-1]);
-    }
+// #ifdef fixed_point_aec
+//     int32_t half_normFactor = 3000;
+//     for (int n=0; n<FILTER_LENGTH; n++){
+//         half_normFactor += abs(x[n+length-1]);
+//     }
 
-    int32_t Q28MAX = 268435456;
-    float half_norm_inv_Q28f = (float)(Q28MAX) / (float)half_normFactor;
-    float mu_Q15f = STEP_SIZE * Q15_MAXf;
-    int32_t n_mu_Q28 = (int32_t)(half_norm_inv_Q28f * mu_Q15f)>>15;
-#endif
+//     int32_t Q28MAX = 268435456;
+//     float half_norm_inv_Q28f = (float)(Q28MAX) / (float)half_normFactor;
+//     float mu_Q15f = STEP_SIZE * Q15_MAXf;
+//     int32_t n_mu_Q28 = (int32_t)(half_norm_inv_Q28f * mu_Q15f)>>15;
+// #endif
 
-    float step_size1000 = STEP_SIZE * 10000;
+//     float step_size1000 = STEP_SIZE * 10000;
 
-    float mu;
-    // 스텝 크기 조정
-    if (updateon==1) {
-        if (*prevAttenuation > 15.0f || refPower < -50.0f){
-            mu = 0.1f * step_size1000 / normFactor;
-        } else if (inst->adapted){
-            mu = 0.7f * step_size1000 / normFactor;
-        }
-        // mu = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? 0.1f * step_size1000 / normFactor : step_size1000 / normFactor;
-        // n_mu_Q28 = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? n_mu_Q28>>3 : n_mu_Q28;
-    } else {
-        mu = 0.05f * step_size1000 / normFactor;
-        // n_mu_Q28 = n_mu_Q28>>3;        
-    }
-    // printf("normFactor=%f mu=%f\r\n", normFactor, mu);
+//     float mu;
+//     // 스텝 크기 조정
+//     if (updateon==1) {
+//         if (*prevAttenuation > 15.0f || refPower < -50.0f){
+//             mu = 0.1f * step_size1000 / normFactor;
+//         } else if (inst->adapted){
+//             mu = 0.7f * step_size1000 / normFactor;
+//         }
+//         // mu = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? 0.1f * step_size1000 / normFactor : step_size1000 / normFactor;
+//         // n_mu_Q28 = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? n_mu_Q28>>3 : n_mu_Q28;
+//     } else {
+//         mu = 0.05f * step_size1000 / normFactor;
+//         // n_mu_Q28 = n_mu_Q28>>3;        
+//     }
+//     // printf("normFactor=%f mu=%f\r\n", normFactor, mu);
 
-    float Attenuationtmp = *prevAttenuation;
+//     float Attenuationtmp = *prevAttenuation;
 
-    int itermax = 1;
-    // if (inst->adapted==0 && Attenuationtmp <= 20.0f){
-    //     if (refPower > -40.0f ){
-    //         itermax = 5;
-    //     //     printf("itermax = 5\r\n");
-    //     // } else if (refPower > -40.0f ){
-    //     //     itermax = 4;
-    //     //     printf("itermax = 4\r\n");
-    //     // } else {
-    //     //     itermax = 3;
-    //     //     printf("itermax = 3\r\n");
-    //     }
-    // }
+//     int itermax = 1;
+//     // if (inst->adapted==0 && Attenuationtmp <= 20.0f){
+//     //     if (refPower > -40.0f ){
+//     //         itermax = 5;
+//     //     //     printf("itermax = 5\r\n");
+//     //     // } else if (refPower > -40.0f ){
+//     //     //     itermax = 4;
+//     //     //     printf("itermax = 4\r\n");
+//     //     // } else {
+//     //     //     itermax = 3;
+//     //     //     printf("itermax = 3\r\n");
+//     //     }
+//     // }
 
-    for (int i = 0; i < FILTER_LENGTH; i++) {
-        weights_slow[i] = weights[i];
-    }
-    int filt_iter = FILTER_LENGTH;
+//     for (int i = 0; i < FILTER_LENGTH; i++) {
+//         weights_slow[i] = weights[i];
+//     }
+//     int filt_iter = FILTER_LENGTH;
 
-    float See = 0.0f;
-    for (int nn=0; nn<itermax; nn++){
-        if (nn>1) filt_iter = 300;
-        for (int n = 0; n < length; n++) {
-            int curidx=FILTER_LENGTH-1+n;
-            for (int i = 0; i < filt_iter; i++) {
-                weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
-            }
+//     float See = 0.0f;
+//     for (int nn=0; nn<itermax; nn++){
+//         if (nn>1) filt_iter = 300;
+//         for (int n = 0; n < length; n++) {
+//             int curidx=FILTER_LENGTH-1+n;
+//             for (int i = 0; i < filt_iter; i++) {
+//                 weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
+//             }
 
-            int32_t y = 16384;
-            int m = curidx;
-            for (int i = 0; i < filt_iter; i++) {
-                y += (weightsQ15[i] * x[m--]);
-                // y += ((w_real_Q33[i]+128)>>8 * x[m--]);
-            }
+//             int32_t y = 16384;
+//             int m = curidx;
+//             for (int i = 0; i < filt_iter; i++) {
+//                 y += (weightsQ15[i] * x[m--]);
+//                 // y += ((w_real_Q33[i]+128)>>8 * x[m--]);
+//             }
 
-#ifdef fixed_point_aec
-            // filtering
-            int32_t temp_real=16384; // (1<<14)
-            m=curidx;
-            for (int k=0; k<FILTER_LENGTH; k++){
-                temp_real=temp_real + (((w_real_Q33[k]+128)>>8) * (int32_t)(x[m]));
-                m--;
-            }      
+// #ifdef fixed_point_aec
+//             // filtering
+//             int32_t temp_real=16384; // (1<<14)
+//             m=curidx;
+//             for (int k=0; k<FILTER_LENGTH; k++){
+//                 temp_real=temp_real + (((w_real_Q33[k]+128)>>8) * (int32_t)(x[m]));
+//                 m--;
+//             }      
 
-            int32_t y =  temp_real>>15;      
-#endif
-            y = y>>15;
+//             int32_t y =  temp_real>>15;      
+// #endif
+//             y = y>>15;
 
-            y_back[n] = y;
+//             y_back[n] = y;
 
-            // 잔차 신호 계산
-            int32_t e = micSignal[n] -  y;
-            error_back[n] = e;
+//             // 잔차 신호 계산
+//             int32_t e = micSignal[n] -  y;
+//             error_back[n] = e;
 
-#ifdef fixed_point_aec            
-            n_e_mu_Q23 = (n_mu_Q28 * e + 32)>>5;            
+// #ifdef fixed_point_aec            
+//             n_e_mu_Q23 = (n_mu_Q28 * e + 32)>>5;            
 
-            m = curidx;
-            for (int i = 0; i < filt_iter; i++) {
-                n_x_Q15[i] = (int32_t)((float)x[m]*half_norm_inv_Q28f)>>13;
-                m--;
-            }
-#endif            
-            if (updateon==1) {
-                e_mu_temp = mu * e;
-#ifdef fixed_point_aec
-                double temp_d = (double)e_mu_temp * (8.589934592000000e+09);
-                int32_t n_e_mu_Q33 = (int32_t)(temp_d);
-#endif
-                m = curidx;
-                if (inst->adapted){
-                    for (int i = 0; i < filt_iter; i++) {
-                            weights[i] = weights[i] + (e_mu_temp * ((float)x[m--]*0.0001)) * inst->prod[i];  
-                    }
-                } else {
-                    for (int i = 0; i < filt_iter; i++) {
-                            weights[i] = weights[i] + e_mu_temp * ((float)x[m--]*0.0001);
-    #ifdef fixed_point_aec
-                        int32_t temp_real = n_e_mu_Q33*(int)(x[m]) + 512; //Q23
-                        w_real_Q33[i] = w_real_Q33[i] + (temp_real>>10);
-    #endif                    
-                    }                    
-                }
-            } 
-        }
+//             m = curidx;
+//             for (int i = 0; i < filt_iter; i++) {
+//                 n_x_Q15[i] = (int32_t)((float)x[m]*half_norm_inv_Q28f)>>13;
+//                 m--;
+//             }
+// #endif            
+//             if (updateon==1) {
+//                 e_mu_temp = mu * e;
+// #ifdef fixed_point_aec
+//                 double temp_d = (double)e_mu_temp * (8.589934592000000e+09);
+//                 int32_t n_e_mu_Q33 = (int32_t)(temp_d);
+// #endif
+//                 m = curidx;
+//                 if (inst->adapted){
+//                     for (int i = 0; i < filt_iter; i++) {
+//                             weights[i] = weights[i] + (e_mu_temp * ((float)x[m--]*0.0001)) * inst->prod[i];  
+//                     }
+//                 } else {
+//                     for (int i = 0; i < filt_iter; i++) {
+//                             weights[i] = weights[i] + e_mu_temp * ((float)x[m--]*0.0001);
+//     #ifdef fixed_point_aec
+//                         int32_t temp_real = n_e_mu_Q33*(int)(x[m]) + 512; //Q23
+//                         w_real_Q33[i] = w_real_Q33[i] + (temp_real>>10);
+//     #endif                    
+//                     }                    
+//                 }
+//             } 
+//         }
 
-        for (int i = 0; i < filt_iter; i++) {
-            weights_slow[i] = weights_slow[i] * 0.99 + weights[i] * 0.01;
-        }        
+//         for (int i = 0; i < filt_iter; i++) {
+//             weights_slow[i] = weights_slow[i] * 0.99 + weights[i] * 0.01;
+//         }        
 
-        // mu *= 0.7;s
+//         // mu *= 0.7;s
 
-        // Calc foreground filter residual power
-        See = 0.0f;
-        for (int n = 0; n < length; n++) {
-            See += (float)(error_back[n] * error_back[n]);
-        }
+//         // Calc foreground filter residual power
+//         See = 0.0f;
+//         for (int n = 0; n < length; n++) {
+//             See += (float)(error_back[n] * error_back[n]);
+//         }
 
-        float errorPowertemp = sqrtf(See / (float)length);
-        Attenuationtmp = 20.0f * log10f(micPower / (errorPowertemp + 1));  
+//         float errorPowertemp = sqrtf(See / (float)length);
+//         Attenuationtmp = 20.0f * log10f(micPower / (errorPowertemp + 1));  
 
-        if (Attenuationtmp>20.0f) break;
-    }    
+//         if (Attenuationtmp>20.0f) break;
+//     }    
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[3] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[3] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif      
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif      
 
 
-    int32_t dbf[FRAME_SIZE];
-    // Calc power of Difference in response
-    for (int n = 0; n < length; n++) {
-        dbf[n]=y_fore[n]-y_back[n];
-    }
+//     int32_t dbf[FRAME_SIZE];
+//     // Calc power of Difference in response
+//     for (int n = 0; n < length; n++) {
+//         dbf[n]=y_fore[n]-y_back[n];
+//     }
 
-    float Dbf = 0.0f;
-    for (int n = 0; n < length; n++) {
-        Dbf += (float)dbf[n] * (float)dbf[n];
-    }
+//     float Dbf = 0.0f;
+//     for (int n = 0; n < length; n++) {
+//         Dbf += (float)dbf[n] * (float)dbf[n];
+//     }
 
-    inst->Davg1 = .6*inst->Davg1 + .4*(Sff-See);
-    inst->Davg2 = .85*inst->Davg2 + .15*(Sff-See);
-    inst->Dvar1 = .36*inst->Dvar1 + .16*Sff*Dbf;
-    inst->Dvar2 = .7225*inst->Dvar2 + .0225*Sff*Dbf;
+//     inst->Davg1 = .6*inst->Davg1 + .4*(Sff-See);
+//     inst->Davg2 = .85*inst->Davg2 + .15*(Sff-See);
+//     inst->Dvar1 = .36*inst->Dvar1 + .16*Sff*Dbf;
+//     inst->Dvar2 = .7225*inst->Dvar2 + .0225*Sff*Dbf;
 
-    inst->update_fore = 0;
-    if ((Sff-See)*fabsf(Sff-See) > Sff*Dbf) inst->update_fore = 1;
-    if ((inst->Davg1)*fabsf(inst->Davg1) > 0.5*inst->Dvar1) inst->update_fore = 2;
-    if ((inst->Davg2)*fabsf(inst->Davg2) > 0.25*inst->Dvar2) inst->update_fore = 3;
+//     inst->update_fore = 0;
+//     if ((Sff-See)*fabsf(Sff-See) > Sff*Dbf) inst->update_fore = 1;
+//     if ((inst->Davg1)*fabsf(inst->Davg1) > 0.5*inst->Dvar1) inst->update_fore = 2;
+//     if ((inst->Davg2)*fabsf(inst->Davg2) > 0.25*inst->Dvar2) inst->update_fore = 3;
 
-    for (int n = 0; n < length; n++) {
-        errorSignal[n]=(int16_t)error_fore[n];
-    }
+//     for (int n = 0; n < length; n++) {
+//         errorSignal[n]=(int16_t)error_fore[n];
+//     }
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[4] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[4] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif   
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif   
     
-    if (inst->update_fore) {
-        for (int i = 0; i < FILTER_LENGTH; i++) {
-            // weights_fore[i] = weights_fore[i]*0.75 + weights[i]* 0.25; // 필터 계수를 0으로 초기화
-            // weights_fore[i] = weights[i];
-            weights_fore[i] = weights_slow[i];
-#ifdef fixed_point_aec            
-            weights_fore[i] = ((float)w_real_Q33[i] * 1.1921e-07);
-#endif        
-        }
+//     if (inst->update_fore) {
+//         for (int i = 0; i < FILTER_LENGTH; i++) {
+//             // weights_fore[i] = weights_fore[i]*0.75 + weights[i]* 0.25; // 필터 계수를 0으로 초기화
+//             // weights_fore[i] = weights[i];
+//             weights_fore[i] = weights_slow[i];
+// #ifdef fixed_point_aec            
+//             weights_fore[i] = ((float)w_real_Q33[i] * 1.1921e-07);
+// #endif        
+//         }
 
-        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
-            for (int i = 0; i < FILTER_LENGTH; i++) {
-                weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
-            }
-        }
+//         if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
+//             for (int i = 0; i < FILTER_LENGTH; i++) {
+//                 weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
+//             }
+//         }
 
-        inst->Davg1 = 0.0;
-        inst->Davg2 = 0.0;
-        inst->Dvar1 = 0.0;
-        inst->Dvar2 = 0.0;        
+//         inst->Davg1 = 0.0;
+//         inst->Davg2 = 0.0;
+//         inst->Dvar1 = 0.0;
+//         inst->Dvar2 = 0.0;        
 
-        for (int n = 0; n < length; n++) {
-            errorSignal[n]=(int16_t)((float)micSignal[n] - ((float)y_back[n]*trans_window[n] + (float)y_fore[n]*trans_window[n+length]));
-            // errorSignal[n]=(int16_t)error_back[n];
-        }
-        // printf("update fore = %d\n", inst->update_fore);
+//         for (int n = 0; n < length; n++) {
+//             errorSignal[n]=(int16_t)((float)micSignal[n] - ((float)y_back[n]*trans_window[n] + (float)y_fore[n]*trans_window[n+length]));
+//             // errorSignal[n]=(int16_t)error_back[n];
+//         }
+//         // printf("update fore = %d\n", inst->update_fore);
 
-    } else {
-        int reset_back = 0;
-        if (-1.0*(Sff-See)*fabsf(Sff-See) > 4.0*Sff*Dbf) reset_back = 1;
-        if (-1.0*(inst->Davg1)*fabsf(inst->Davg1) > 4.0*inst->Dvar1) reset_back = 1;
-        if (-1.0*(inst->Davg2)*fabsf(inst->Davg2) > 4.0*inst->Dvar2) reset_back = 1;
+//     } else {
+//         int reset_back = 0;
+//         if (-1.0*(Sff-See)*fabsf(Sff-See) > 4.0*Sff*Dbf) reset_back = 1;
+//         if (-1.0*(inst->Davg1)*fabsf(inst->Davg1) > 4.0*inst->Dvar1) reset_back = 1;
+//         if (-1.0*(inst->Davg2)*fabsf(inst->Davg2) > 4.0*inst->Dvar2) reset_back = 1;
 
-        if (reset_back) {
-            for (int i = 0; i < FILTER_LENGTH; i++) {
-                weights[i] = weights_fore[i]; // 필터 계수를 0으로 초기화
-            }
+//         if (reset_back) {
+//             for (int i = 0; i < FILTER_LENGTH; i++) {
+//                 weights[i] = weights_fore[i]; // 필터 계수를 0으로 초기화
+//             }
 
-            See = Sff;
-            inst->Davg1 = 0.0;
-            inst->Davg2 = 0.0;
-            inst->Dvar1 = 0.0;
-            inst->Dvar2 = 0.0;
+//             See = Sff;
+//             inst->Davg1 = 0.0;
+//             inst->Davg2 = 0.0;
+//             inst->Dvar1 = 0.0;
+//             inst->Dvar2 = 0.0;
 
-	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
-                for (int i = 0; i < FILTER_LENGTH; i++) {
-                    weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
-                }                
-            }
+// 	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
+//                 for (int i = 0; i < FILTER_LENGTH; i++) {
+//                     weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
+//                 }                
+//             }
 
-            // printf("reset back\n");
-        }  else {
-	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){            
-                for (int i = 0; i < FILTER_LENGTH; i++) {
-                    weightsQ15[i] = (int32_t)(weights_fore[i] * 32768.0f);
-                }                
-            }
-            // printf("just go\n");
-        }      
-    }  
+//             printf("reset back\n");
+//         }  else {
+// 	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){            
+//                 for (int i = 0; i < FILTER_LENGTH; i++) {
+//                     weightsQ15[i] = (int32_t)(weights_fore[i] * 32768.0f);
+//                 }                
+//             }
+//             printf("just go\n");
+//         }      
+//     }  
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[5] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[5] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif   
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif   
 
-    // 필터 계수 발산 방지
-    int resetWeights = 0; // 초기값: 0 (거짓)
-    for (int i = 0; i < FILTER_LENGTH; i++) {
-        if (fabs(weights[i]) > WEIGHT_THRESHOLD || isnan(weights[i])) {
-            printf("inst= %d, Weights[%d] is %f\n", inst->chan_num, i, fabs(weights[i]));
-            resetWeights = 1; // 참
-            break;
-        }
-    }
-    if (resetWeights) {
-        for (int i = 0; i < FILTER_LENGTH; i++) {
-            // weights[i] = 0.0f; // 필터 계수를 0으로 초기화
-            weights[i] = weights_fore[i]; // 필터 계수를 0으로 초기화
-        }
-        inst->adapted = 0;
-        inst->sum_adapt = 0;
-        printf("Weights reset to prevent divergence.\n");
-    }
+//     // 필터 계수 발산 방지
+//     int resetWeights = 0; // 초기값: 0 (거짓)
+//     for (int i = 0; i < FILTER_LENGTH; i++) {
+//         if (fabs(weights[i]) > WEIGHT_THRESHOLD || isnan(weights[i])) {
+//             printf("inst= %d, Weights[%d] is %f\n", inst->chan_num, i, fabs(weights[i]));
+//             resetWeights = 1; // 참
+//             break;
+//         }
+//     }
+//     if (resetWeights) {
+//         for (int i = 0; i < FILTER_LENGTH; i++) {
+//             // weights[i] = 0.0f; // 필터 계수를 0으로 초기화
+//             weights[i] = weights_fore[i]; // 필터 계수를 0으로 초기화
+//         }
+//         inst->adapted = 0;
+//         inst->sum_adapt = 0;
+//         printf("Weights reset to prevent divergence.\n");
+//     }
 
-    // 감쇄량 계산
+//     // 감쇄량 계산
 
-    float errorPower = calculate_rms_int32((int16_t *)errorSignal, length);
-    *prevAttenuation = 20.0f * log10f(micPower / (errorPower + 1));
+//     float errorPower = calculate_rms_int32((int16_t *)errorSignal, length);
+//     *prevAttenuation = 20.0f * log10f(micPower / (errorPower + 1));
 
-    if (updateon==1) {
-        float tmp = Sxx;
-        if (tmp>See){
-            tmp = See;
-        }
-        inst->adapt_rate = 0.25* tmp / (See+1);
-        inst->sum_adapt += inst->adapt_rate;
-    }
+//     if (updateon==1) {
+//         float tmp = Sxx;
+//         if (tmp>See){
+//             tmp = See;
+//         }
+//         inst->adapt_rate = 0.25* tmp / (See+1);
+//         inst->sum_adapt += inst->adapt_rate;
+//     }
 
-    if (!inst->adapted && inst->sum_adapt > 7 && *prevAttenuation > 20.0f)
-    {    
-        inst->adapted = 1;
-    }
+//     if (!inst->adapted && inst->sum_adapt > 7 && *prevAttenuation > 20.0f)
+//     {    
+//         inst->adapted = 1;
+//     }
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[6] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[6] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        total_end = clock();
-        totalRunTime += ((double)(total_end - total_start)) / CLOCKS_PER_SEC;
+// #ifdef ENABLE_PROFILING2
+//         total_end = clock();
+//         totalRunTime += ((double)(total_end - total_start)) / CLOCKS_PER_SEC;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-    // 평균 시간 출력
-    count++;
-    if (totalRunTime >= PRINT_INTERVAL) {
-        printf("Average execution time for each step (1-second intervals):\n");
-        for (int i = 0; i < NUM_STEPS; i++) {
-            double averageTime = totalTime[i] / count;
-            double percentage = (totalTime[i] / totalRunTime) * 100.0;
-            printf("Step %d: Average Time = %.2f milli seconds, Percentage = %f%%\n", i + 1, averageTime* 1000, percentage);
-        }
-        // 총 실행 시간 및 각 단계별 누적 시간 초기화
-        totalRunTime = 0.0;
-        for (int i = 0; i < NUM_STEPS; i++) {
-            totalTime[i] = 0.0;
-        }
-        count = 0; // 카운트 초기화
-    }
-#endif
+// #ifdef ENABLE_PROFILING2
+//     // 평균 시간 출력
+//     count++;
+//     if (totalRunTime >= PRINT_INTERVAL) {
+//         printf("Average execution time for each step (1-second intervals):\n");
+//         for (int i = 0; i < NUM_STEPS; i++) {
+//             double averageTime = totalTime[i] / count;
+//             double percentage = (totalTime[i] / totalRunTime) * 100.0;
+//             printf("Step %d: Average Time = %.2f milli seconds, Percentage = %f%%\n", i + 1, averageTime* 1000, percentage);
+//         }
+//         // 총 실행 시간 및 각 단계별 누적 시간 초기화
+//         totalRunTime = 0.0;
+//         for (int i = 0; i < NUM_STEPS; i++) {
+//             totalTime[i] = 0.0;
+//         }
+//         count = 0; // 카운트 초기화
+//     }
+// #endif
 
 
-#ifdef DEBUG_AEC
-	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
+// #ifdef DEBUG_AEC
+// 	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)){
        
-        FloatPacket packet;
-        // packet.val1 = (float)((Sff-See)*fabsf(Sff-See));
-        // packet.val2 = (float)(Sff*Dbf);
-        // packet.val3 = (float)((inst->Davg1)*fabsf(inst->Davg1));
-        // packet.val4 = (float)(0.5*inst->Dvar1);
-        // packet.val5 = (float)((inst->Davg2)*fabsf(inst->Davg2));
-        // packet.val6 = (float)(0.25*inst->Dvar2);
+//         FloatPacket packet;
+//         // packet.val1 = (float)((Sff-See)*fabsf(Sff-See));
+//         // packet.val2 = (float)(Sff*Dbf);
+//         // packet.val3 = (float)((inst->Davg1)*fabsf(inst->Davg1));
+//         // packet.val4 = (float)(0.5*inst->Dvar1);
+//         // packet.val5 = (float)((inst->Davg2)*fabsf(inst->Davg2));
+//         // packet.val6 = (float)(0.25*inst->Dvar2);
 
-        packet.val1 = (float)calculate_rms_int32((int16_t *)refSignal, length);
-        packet.val2 = (float)micPower;
-        packet.val3 = (float)micPower;
-        packet.val4 = (float)errorPower;
-        packet.val5 = (float)inst->sum_adapt;
-        packet.val6 = (float)inst->adapt_rate;        
+//         packet.val1 = (float)calculate_rms_int32((int16_t *)refSignal, length);
+//         packet.val2 = (float)micPower;
+//         packet.val3 = (float)micPower;
+//         packet.val4 = (float)errorPower;
+//         packet.val5 = (float)inst->sum_adapt;
+//         packet.val6 = (float)inst->adapt_rate;        
 
-        debug_matlab_ssl_float_packet_send(8, packet);
-        debug_matlab_int_array_send(9, &weightsQ15[0], FILTER_LENGTH);
-        // debug_matlab_int_array_send(9, &w_real_Q33[0], FILTER_LENGTH);
+//         debug_matlab_ssl_float_packet_send(8, packet);
+//         debug_matlab_int_array_send(9, &weightsQ15[0], FILTER_LENGTH);
+//         // debug_matlab_int_array_send(9, &w_real_Q33[0], FILTER_LENGTH);
 
-        debug_matlab_ssl_float_send(10, (*prevAttenuation));
-        // debug_matlab_ssl_float_send(10, e_mu_temp*8.5899e+09);
-        // debug_matlab_ssl_float_send(10, (float)n_e_mu_Q23);
+//         debug_matlab_ssl_float_send(10, (*prevAttenuation));
+//         // debug_matlab_ssl_float_send(10, e_mu_temp*8.5899e+09);
+//         // debug_matlab_ssl_float_send(10, (float)n_e_mu_Q23);
 
-        // debug_matlab_ssl_float_send(10, (Dbf));
-    }
+//         // debug_matlab_ssl_float_send(10, (Dbf));
+//     }
 
-	if ((g_aec_debug_on==1)&&(inst->chan_num==0)){
-		g_aec_debug_snd_idx++;
-		if (g_aec_debug_snd_idx>=g_aec_debug_snd_period) {
-			g_aec_debug_snd_idx = 0;
-		}
-	}
-#endif 
+// 	if ((g_aec_debug_on==1)){
+// 		g_aec_debug_snd_idx++;
+// 		if (g_aec_debug_snd_idx>=g_aec_debug_snd_period) {
+// 			g_aec_debug_snd_idx = 0;
+// 		}
+// 	}
+// #endif 
 
-}
+// }
 
-// NLMS 에코 캔슬러 함수 (필터 가중치 업데이트는 플로팅 연산)
-void nlms_echo_canceller_two_path_soft(aecInst_t *aecInst, int16_t *refSignal, int16_t *micSignal, float *weights, float *weights_fore, float *leaky, int16_t *errorSignal, int32_t *x, float refPower, float *prevAttenuation, int length, int updateon) {
+// // NLMS 에코 캔슬러 함수 (필터 가중치 업데이트는 플로팅 연산)
+// void nlms_echo_canceller_two_path_soft(aecInst_t *aecInst, int16_t *refSignal, int16_t *micSignal, float *weights, float *weights_fore, float *leaky, int16_t *errorSignal, int32_t *x, float refPower, float *prevAttenuation, int length, int updateon) {
 
-    aecInst_t *inst = (aecInst_t *)aecInst;
+//     aecInst_t *inst = (aecInst_t *)aecInst;
 
-    const float WEIGHT_THRESHOLD = 10.0f; // 필터 가중치의 상한 값
+//     const float WEIGHT_THRESHOLD = 10.0f; // 필터 가중치의 상한 값
 
-    int32_t weightsQ15[FILTER_LENGTH];
-    int32_t error_fore[FRAME_SIZE];
-    int32_t error_back[FRAME_SIZE];
-    int32_t y_fore[FRAME_SIZE];
-    int32_t y_back[FRAME_SIZE];
-    float *trans_window = &inst->trans_window1024[0];
+//     int32_t weightsQ15[FILTER_LENGTH];
+//     int32_t error_fore[FRAME_SIZE];
+//     int32_t error_back[FRAME_SIZE];
+//     int32_t y_fore[FRAME_SIZE];
+//     int32_t y_back[FRAME_SIZE];
+//     float *trans_window = &inst->trans_window1024[0];
 
-    float weights_slow[FILTER_LENGTH];
-    float e_mu_temp = 0;    
+//     float weights_slow[FILTER_LENGTH];
+//     float e_mu_temp = 0;    
 
-#ifdef fixed_point_aec
-    int32_t n_x_Q15[FILTER_LENGTH];
-    int32_t n_e_mu_Q23 = 0;
-#endif
+// #ifdef fixed_point_aec
+//     int32_t n_x_Q15[FILTER_LENGTH];
+//     int32_t n_e_mu_Q23 = 0;
+// #endif
 
 
-    if (length == 1024) {
-        trans_window = &inst->trans_window1024[0];
-    } else if (length == 1600) {
-        trans_window = &inst->trans_window1600[0];
-    } else if (length == 512) {
-        trans_window = &inst->trans_window512[0];
-    } else {
+//     if (length == 1024) {
+//         trans_window = &inst->trans_window1024[0];
+//     } else if (length == 1600) {
+//         trans_window = &inst->trans_window1600[0];
+//     } else if (length == 512) {
+//         trans_window = &inst->trans_window512[0];
+//     } else {
 
-        for (int i = 0; i < length * 2; i++) {
-            inst->trans_window1600[i] = .5 - .5 * cos(2 * M_PI * i / (length * 2));        
-        }
+//         for (int i = 0; i < length * 2; i++) {
+//             inst->trans_window1600[i] = .5 - .5 * cos(2 * M_PI * i / (length * 2));        
+//         }
             
-        trans_window = &inst->trans_window1600[0];
-    }
-#ifdef ENABLE_PROFILING2
-        total_start = clock();
-#endif
+//         trans_window = &inst->trans_window1600[0];
+//     }
+// #ifdef ENABLE_PROFILING2
+//         total_start = clock();
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif          
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif          
 
-    for (int n=0; n<FILTER_LENGTH-1; n++){
-        x[n]=x[n+length];
-    }
+//     for (int n=0; n<FILTER_LENGTH-1; n++){
+//         x[n]=x[n+length];
+//     }
 
-    for (int n=0; n<length; n++){
-        x[n+FILTER_LENGTH-1]=refSignal[n];
-    }
+//     for (int n=0; n<length; n++){
+//         x[n+FILTER_LENGTH-1]=refSignal[n];
+//     }
 
-    // Foreground filtering
-    for (int i = 0; i < FILTER_LENGTH; i++) {
-        weightsQ15[i] = (int32_t)(weights_fore[i] * 32768.0f);
-    }    
+//     // Foreground filtering
+//     for (int i = 0; i < FILTER_LENGTH; i++) {
+//         weightsQ15[i] = (int32_t)(weights_fore[i] * 32768.0f);
+//     }    
 
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[0] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[0] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif          
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif          
 
-    for (int n = 0; n < length; n++) {
+//     for (int n = 0; n < length; n++) {
 
-        int curidx=FILTER_LENGTH-1+n;
+//         int curidx=FILTER_LENGTH-1+n;
        
-        int32_t y = 16384;
-        int m = curidx;
-        for (int i = 0; i < FILTER_LENGTH/2; i++) {
-            y += (weightsQ15[i] * x[m--]);
-            // m--;
-        }
+//         int32_t y = 16384;
+//         int m = curidx;
+//         for (int i = 0; i < FILTER_LENGTH/2; i++) {
+//             y += (weightsQ15[i] * x[m--]);
+//             // m--;
+//         }
 
-        y = y>>15;
+//         y = y>>15;
 
-        y_fore[n] = y;
+//         y_fore[n] = y;
 
-        // 잔차 신호 계산
-        int32_t e = (micSignal[n] -  y);
-        error_fore[n] = e;
-    }
+//         // 잔차 신호 계산
+//         int32_t e = (micSignal[n] -  y);
+//         error_fore[n] = e;
+//     }
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[1] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[1] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif          
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif          
 
-    // Calc foreground filter residual power
-    float Sff = 0.0f;
-    for (int n = 0; n < length; n++) {
-        Sff += (float)(error_fore[n] * error_fore[n]);
-    }
+//     // Calc foreground filter residual power
+//     float Sff = 0.0f;
+//     for (int n = 0; n < length; n++) {
+//         Sff += (float)(error_fore[n] * error_fore[n]);
+//     }
 
-    // Calc foreground filter residual power
-    float Sxx = 0.0f;
-    for (int n = 0; n < length; n++) {
-        Sxx += (float)((int32_t)refSignal[n] * (int32_t)refSignal[n]);
-    }
+//     // Calc foreground filter residual power
+//     float Sxx = 0.0f;
+//     for (int n = 0; n < length; n++) {
+//         Sxx += (float)((int32_t)refSignal[n] * (int32_t)refSignal[n]);
+//     }
 
-    // Calc foreground filter residual power
-    float Sdd = 0.0f;
-    for (int n = 0; n < length; n++) {
-        Sdd += (float)((int32_t)micSignal[n] * (int32_t)micSignal[n]);
-    }
-    float micPower = sqrtf(Sdd / (float)length);
+//     // Calc foreground filter residual power
+//     float Sdd = 0.0f;
+//     for (int n = 0; n < length; n++) {
+//         Sdd += (float)((int32_t)micSignal[n] * (int32_t)micSignal[n]);
+//     }
+//     float micPower = sqrtf(Sdd / (float)length);
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[2] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[2] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif      
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif      
 
-    float normFactor = 500.0f;
-    for (int n=0; n<FILTER_LENGTH; n++){
-        normFactor += (float)(x[n+length-1] * x[n+length-1]);
-    }
+//     float normFactor = 500.0f;
+//     for (int n=0; n<FILTER_LENGTH; n++){
+//         normFactor += (float)(x[n+length-1] * x[n+length-1]);
+//     }
 
-#ifdef fixed_point_aec
-    int32_t half_normFactor = 3000;
-    for (int n=0; n<FILTER_LENGTH; n++){
-        half_normFactor += abs(x[n+length-1]);
-    }
+// #ifdef fixed_point_aec
+//     int32_t half_normFactor = 3000;
+//     for (int n=0; n<FILTER_LENGTH; n++){
+//         half_normFactor += abs(x[n+length-1]);
+//     }
 
-    int32_t Q28MAX = 268435456;
-    float half_norm_inv_Q28f = (float)(Q28MAX) / (float)half_normFactor;
-    float mu_Q15f = STEP_SIZE * Q15_MAXf;
-    int32_t n_mu_Q28 = (int32_t)(half_norm_inv_Q28f * mu_Q15f)>>15;
-#endif
+//     int32_t Q28MAX = 268435456;
+//     float half_norm_inv_Q28f = (float)(Q28MAX) / (float)half_normFactor;
+//     float mu_Q15f = STEP_SIZE * Q15_MAXf;
+//     int32_t n_mu_Q28 = (int32_t)(half_norm_inv_Q28f * mu_Q15f)>>15;
+// #endif
 
-    float mu;
-    // 스텝 크기 조정
-    if (updateon==1) {
-        mu = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? 0.05f * STEP_SIZE / normFactor : STEP_SIZE / normFactor;
-        // n_mu_Q28 = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? n_mu_Q28>>3 : n_mu_Q28;
-    } else {
-        mu = 0.05f * STEP_SIZE / normFactor;
-        // n_mu_Q28 = n_mu_Q28>>3;        
-    }
-    // printf("normFactor=%f mu=%f\r\n", normFactor, mu);
+//     float mu;
+//     // 스텝 크기 조정
+//     if (updateon==1) {
+//         mu = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? 0.05f * STEP_SIZE / normFactor : STEP_SIZE / normFactor;
+//         // n_mu_Q28 = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? n_mu_Q28>>3 : n_mu_Q28;
+//     } else {
+//         mu = 0.05f * STEP_SIZE / normFactor;
+//         // n_mu_Q28 = n_mu_Q28>>3;        
+//     }
+//     // printf("normFactor=%f mu=%f\r\n", normFactor, mu);
 
-    float Attenuationtmp = *prevAttenuation;
+//     float Attenuationtmp = *prevAttenuation;
 
-    int itermax = 1;
-    // if (inst->adapted==0 && Attenuationtmp <= 20.0f){
-    //     if (refPower > -40.0f ){
-    //         itermax = 3;
-    //     //     printf("itermax = 5\r\n");
-    //     // } else if (refPower > -40.0f ){
-    //     //     itermax = 4;
-    //     //     printf("itermax = 4\r\n");
-    //     // } else {
-    //     //     itermax = 3;
-    //     //     printf("itermax = 3\r\n");
-    //     }
-    // }
+//     int itermax = 1;
+//     // if (inst->adapted==0 && Attenuationtmp <= 20.0f){
+//     //     if (refPower > -40.0f ){
+//     //         itermax = 3;
+//     //     //     printf("itermax = 5\r\n");
+//     //     // } else if (refPower > -40.0f ){
+//     //     //     itermax = 4;
+//     //     //     printf("itermax = 4\r\n");
+//     //     // } else {
+//     //     //     itermax = 3;
+//     //     //     printf("itermax = 3\r\n");
+//     //     }
+//     // }
 
-    for (int i = 0; i < FILTER_LENGTH; i++) {
-        weights_slow[i] = weights[i];
-    }
-    int filt_iter = FILTER_LENGTH;
+//     for (int i = 0; i < FILTER_LENGTH; i++) {
+//         weights_slow[i] = weights[i];
+//     }
+//     int filt_iter = FILTER_LENGTH;
 
-    float See = 0.0f;
-    for (int nn=0; nn<itermax; nn++){
-        if (nn>1) filt_iter = 300;
-        for (int n = 0; n < length; n++) {
+//     float See = 0.0f;
+//     for (int nn=0; nn<itermax; nn++){
+//         if (nn>1) filt_iter = 300;
+//         for (int n = 0; n < length; n++) {
 
-            int curidx=FILTER_LENGTH-1+n;
+//             int curidx=FILTER_LENGTH-1+n;
 
-            for (int i = 0; i < filt_iter; i++) {
-                weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
-            }
+//             for (int i = 0; i < filt_iter; i++) {
+//                 weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
+//             }
 
-            int32_t y = 16384;
-            int m = curidx;
-            for (int i = 0; i < filt_iter; i++) {
-                y += (weightsQ15[i] * x[m--]);
-                // y += ((w_real_Q33[i]+128)>>8 * x[m--]);
-            }
+//             int32_t y = 16384;
+//             int m = curidx;
+//             for (int i = 0; i < filt_iter; i++) {
+//                 y += (weightsQ15[i] * x[m--]);
+//                 // y += ((w_real_Q33[i]+128)>>8 * x[m--]);
+//             }
 
-#ifdef fixed_point_aec
-            // filtering
-            int32_t temp_real=16384; // (1<<14)
-            m=curidx;
-            for (int k=0; k<FILTER_LENGTH; k++){
-                temp_real=temp_real + (((w_real_Q33[k]+128)>>8) * (int32_t)(x[m]));
-                m--;
-            }      
+// #ifdef fixed_point_aec
+//             // filtering
+//             int32_t temp_real=16384; // (1<<14)
+//             m=curidx;
+//             for (int k=0; k<FILTER_LENGTH; k++){
+//                 temp_real=temp_real + (((w_real_Q33[k]+128)>>8) * (int32_t)(x[m]));
+//                 m--;
+//             }      
 
-            int32_t y =  temp_real>>15;      
-#endif
-            y = y>>15;
+//             int32_t y =  temp_real>>15;      
+// #endif
+//             y = y>>15;
 
-            y_back[n] = y;
+//             y_back[n] = y;
 
-            // 잔차 신호 계산
-            int32_t e = micSignal[n] -  y;
-            error_back[n] = e;
+//             // 잔차 신호 계산
+//             int32_t e = micSignal[n] -  y;
+//             error_back[n] = e;
 
-#ifdef fixed_point_aec            
-            n_e_mu_Q23 = (n_mu_Q28 * e + 32)>>5;            
+// #ifdef fixed_point_aec            
+//             n_e_mu_Q23 = (n_mu_Q28 * e + 32)>>5;            
 
-            m = curidx;
-            for (int i = 0; i < filt_iter; i++) {
-                n_x_Q15[i] = (int32_t)((float)x[m]*half_norm_inv_Q28f)>>13;
-                m--;
-            }
-#endif            
+//             m = curidx;
+//             for (int i = 0; i < filt_iter; i++) {
+//                 n_x_Q15[i] = (int32_t)((float)x[m]*half_norm_inv_Q28f)>>13;
+//                 m--;
+//             }
+// #endif            
 
-            if (updateon==1) {
+//             if (updateon==1) {
 
-                e_mu_temp = mu * e;
-
-
-
-                // printf("e_mu_temp = %f \r\n", e_mu_temp);
-
-#ifdef fixed_point_aec
-                double temp_d = (double)e_mu_temp * (8.589934592000000e+09);
-                int32_t n_e_mu_Q33 = (int32_t)(temp_d);
-#endif
-                // 필터 가중치 업데이트 (플로팅 연산)
+//                 e_mu_temp = mu * e;
 
 
 
-                m = curidx;
-                for (int i = 0; i < filt_iter; i++) {
-                    // weights[i] = weights[i] * leaky[i] + mu * e * (float)x[m];
-                    weights[i] = weights[i] + e_mu_temp * (float)x[m];
-                    m--;
+//                 // printf("e_mu_temp = %f \r\n", e_mu_temp);
 
-                    // w_real_Q33[i] = w_real_Q33[i] + (n_x_Q15[i] * n_e_mu_Q23+16)>>5;
-
-                    // printf("w_real_Q33[i]  = %d n_x_Q15[%d] = %d\r\n", w_real_Q33[i], i, n_x_Q15[i]);
-
-#ifdef fixed_point_aec
-                    int32_t temp_real = n_e_mu_Q33*(int)(x[m]) + 512; //Q23
-                    w_real_Q33[i] = w_real_Q33[i] + (temp_real>>10);
-#endif                    
-                }
-            } else {
-                // for (int i = 0; i < FILTER_LENGTH; i++) {
-                //     weights[i] = weights[i] * leaky[i];
-                // }            
-            }
-        }
-
-        for (int i = 0; i < filt_iter; i++) {
-            weights_slow[i] = weights_slow[i] * 0.99 + weights[i] * 0.01;
-        }        
-
-        // mu *= 0.7;s
-
-        // Calc foreground filter residual power
-        See = 0.0f;
-        for (int n = 0; n < length; n++) {
-            See += (float)(error_back[n] * error_back[n]);
-        }
-
-        float errorPowertemp = sqrtf(See / (float)length);
-        Attenuationtmp = 20.0f * log10f(micPower / (errorPowertemp + 1));  
-
-        if (Attenuationtmp>20.0f) break;
-    }    
-
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[3] += stepTime;
-
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
-
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif      
+// #ifdef fixed_point_aec
+//                 double temp_d = (double)e_mu_temp * (8.589934592000000e+09);
+//                 int32_t n_e_mu_Q33 = (int32_t)(temp_d);
+// #endif
+//                 // 필터 가중치 업데이트 (플로팅 연산)
 
 
-    int32_t dbf[FRAME_SIZE];
-    // Calc power of Difference in response
-    for (int n = 0; n < length; n++) {
-        dbf[n]=y_fore[n]-y_back[n];
-    }
 
-    float Dbf = 0.0f;
-    for (int n = 0; n < length; n++) {
-        Dbf += (float)dbf[n] * (float)dbf[n];
-    }
+//                 m = curidx;
+//                 for (int i = 0; i < filt_iter; i++) {
+//                     // weights[i] = weights[i] * leaky[i] + mu * e * (float)x[m];
+//                     weights[i] = weights[i] + e_mu_temp * (float)x[m];
+//                     m--;
 
-    inst->Davg1 = .6*inst->Davg1 + .4*(Sff-See);
-    inst->Davg2 = .85*inst->Davg2 + .15*(Sff-See);
-    inst->Dvar1 = .36*inst->Dvar1 + .16*Sff*Dbf;
-    inst->Dvar2 = .7225*inst->Dvar2 + .0225*Sff*Dbf;
+//                     // w_real_Q33[i] = w_real_Q33[i] + (n_x_Q15[i] * n_e_mu_Q23+16)>>5;
 
-    inst->update_fore = 0;
-    if ((Sff-See)*fabsf(Sff-See) > Sff*Dbf) inst->update_fore = 1;
-    if ((inst->Davg1)*fabsf(inst->Davg1) > 0.5*inst->Dvar1) inst->update_fore = 2;
-    if ((inst->Davg2)*fabsf(inst->Davg2) > 0.25*inst->Dvar2) inst->update_fore = 3;
+//                     // printf("w_real_Q33[i]  = %d n_x_Q15[%d] = %d\r\n", w_real_Q33[i], i, n_x_Q15[i]);
 
-    for (int n = 0; n < length; n++) {
-        errorSignal[n]=(int16_t)error_fore[n];
-    }
+// #ifdef fixed_point_aec
+//                     int32_t temp_real = n_e_mu_Q33*(int)(x[m]) + 512; //Q23
+//                     w_real_Q33[i] = w_real_Q33[i] + (temp_real>>10);
+// #endif                    
+//                 }
+//             } else {
+//                 // for (int i = 0; i < FILTER_LENGTH; i++) {
+//                 //     weights[i] = weights[i] * leaky[i];
+//                 // }            
+//             }
+//         }
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[4] += stepTime;
+//         for (int i = 0; i < filt_iter; i++) {
+//             weights_slow[i] = weights_slow[i] * 0.99 + weights[i] * 0.01;
+//         }        
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // mu *= 0.7;s
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif   
+//         // Calc foreground filter residual power
+//         See = 0.0f;
+//         for (int n = 0; n < length; n++) {
+//             See += (float)(error_back[n] * error_back[n]);
+//         }
+
+//         float errorPowertemp = sqrtf(See / (float)length);
+//         Attenuationtmp = 20.0f * log10f(micPower / (errorPowertemp + 1));  
+
+//         if (Attenuationtmp>20.0f) break;
+//     }    
+
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[3] += stepTime;
+
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
+
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif      
+
+
+//     int32_t dbf[FRAME_SIZE];
+//     // Calc power of Difference in response
+//     for (int n = 0; n < length; n++) {
+//         dbf[n]=y_fore[n]-y_back[n];
+//     }
+
+//     float Dbf = 0.0f;
+//     for (int n = 0; n < length; n++) {
+//         Dbf += (float)dbf[n] * (float)dbf[n];
+//     }
+
+//     inst->Davg1 = .6*inst->Davg1 + .4*(Sff-See);
+//     inst->Davg2 = .85*inst->Davg2 + .15*(Sff-See);
+//     inst->Dvar1 = .36*inst->Dvar1 + .16*Sff*Dbf;
+//     inst->Dvar2 = .7225*inst->Dvar2 + .0225*Sff*Dbf;
+
+//     inst->update_fore = 0;
+//     if ((Sff-See)*fabsf(Sff-See) > Sff*Dbf) inst->update_fore = 1;
+//     if ((inst->Davg1)*fabsf(inst->Davg1) > 0.5*inst->Dvar1) inst->update_fore = 2;
+//     if ((inst->Davg2)*fabsf(inst->Davg2) > 0.25*inst->Dvar2) inst->update_fore = 3;
+
+//     for (int n = 0; n < length; n++) {
+//         errorSignal[n]=(int16_t)error_fore[n];
+//     }
+
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[4] += stepTime;
+
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
+
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif   
     
-    if (inst->update_fore) {
-        for (int i = 0; i < FILTER_LENGTH; i++) {
-            // weights_fore[i] = weights_fore[i]*0.75 + weights[i]* 0.25; // 필터 계수를 0으로 초기화
-            // weights_fore[i] = weights[i];
-            weights_fore[i] = weights_slow[i];
-#ifdef fixed_point_aec            
-            weights_fore[i] = ((float)w_real_Q33[i] * 1.1921e-07);
-#endif        
-        }
+//     if (inst->update_fore) {
+//         for (int i = 0; i < FILTER_LENGTH; i++) {
+//             // weights_fore[i] = weights_fore[i]*0.75 + weights[i]* 0.25; // 필터 계수를 0으로 초기화
+//             // weights_fore[i] = weights[i];
+//             weights_fore[i] = weights_slow[i];
+// #ifdef fixed_point_aec            
+//             weights_fore[i] = ((float)w_real_Q33[i] * 1.1921e-07);
+// #endif        
+//         }
 
-        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
-            for (int i = 0; i < FILTER_LENGTH; i++) {
-                weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
-            }
-        }
+//         if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
+//             for (int i = 0; i < FILTER_LENGTH; i++) {
+//                 weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
+//             }
+//         }
 
-        inst->Davg1 = 0.0;
-        inst->Davg2 = 0.0;
-        inst->Dvar1 = 0.0;
-        inst->Dvar2 = 0.0;        
+//         inst->Davg1 = 0.0;
+//         inst->Davg2 = 0.0;
+//         inst->Dvar1 = 0.0;
+//         inst->Dvar2 = 0.0;        
 
-        for (int n = 0; n < length; n++) {
-            errorSignal[n]=(int16_t)((float)micSignal[n] - ((float)y_back[n]*trans_window[n] + (float)y_fore[n]*trans_window[n+length]));
-            // errorSignal[n]=(int16_t)error_back[n];
-        }
-        // printf("update fore = %d\n", inst->update_fore);
+//         for (int n = 0; n < length; n++) {
+//             errorSignal[n]=(int16_t)((float)micSignal[n] - ((float)y_back[n]*trans_window[n] + (float)y_fore[n]*trans_window[n+length]));
+//             // errorSignal[n]=(int16_t)error_back[n];
+//         }
+//         // printf("update fore = %d\n", inst->update_fore);
 
-    } else {
-        int reset_back = 0;
-        if (-1.0*(Sff-See)*fabsf(Sff-See) > 4.0*Sff*Dbf) reset_back = 1;
-        if (-1.0*(inst->Davg1)*fabsf(inst->Davg1) > 4.0*inst->Dvar1) reset_back = 1;
-        if (-1.0*(inst->Davg2)*fabsf(inst->Davg2) > 4.0*inst->Dvar2) reset_back = 1;
+//     } else {
+//         int reset_back = 0;
+//         if (-1.0*(Sff-See)*fabsf(Sff-See) > 4.0*Sff*Dbf) reset_back = 1;
+//         if (-1.0*(inst->Davg1)*fabsf(inst->Davg1) > 4.0*inst->Dvar1) reset_back = 1;
+//         if (-1.0*(inst->Davg2)*fabsf(inst->Davg2) > 4.0*inst->Dvar2) reset_back = 1;
 
-        if (reset_back) {
-            for (int i = 0; i < FILTER_LENGTH; i++) {
-                weights[i] = weights_fore[i]; // 필터 계수를 0으로 초기화
-            }
+//         if (reset_back) {
+//             for (int i = 0; i < FILTER_LENGTH; i++) {
+//                 weights[i] = weights_fore[i]; // 필터 계수를 0으로 초기화
+//             }
 
-            See = Sff;
-            inst->Davg1 = 0.0;
-            inst->Davg2 = 0.0;
-            inst->Dvar1 = 0.0;
-            inst->Dvar2 = 0.0;
+//             See = Sff;
+//             inst->Davg1 = 0.0;
+//             inst->Davg2 = 0.0;
+//             inst->Dvar1 = 0.0;
+//             inst->Dvar2 = 0.0;
 
-	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
-                for (int i = 0; i < FILTER_LENGTH; i++) {
-                    weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
-                }                
-            }
+// 	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
+//                 for (int i = 0; i < FILTER_LENGTH; i++) {
+//                     weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
+//                 }                
+//             }
 
-            // printf("reset back\n");
-        }  else {
-	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){            
-                for (int i = 0; i < FILTER_LENGTH; i++) {
-                    weightsQ15[i] = (int32_t)(weights_fore[i] * 32768.0f);
-                }                
-            }
-            // printf("just go\n");
-        }      
-    }  
+//             // printf("reset back\n");
+//         }  else {
+// 	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){            
+//                 for (int i = 0; i < FILTER_LENGTH; i++) {
+//                     weightsQ15[i] = (int32_t)(weights_fore[i] * 32768.0f);
+//                 }                
+//             }
+//             // printf("just go\n");
+//         }      
+//     }  
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[5] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[5] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif   
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif   
 
-    // 필터 계수 발산 방지
-    int resetWeights = 0; // 초기값: 0 (거짓)
-    for (int i = 0; i < FILTER_LENGTH; i++) {
-        if (fabs(weights[i]) > WEIGHT_THRESHOLD || isnan(weights[i])) {
-            printf("Weights[%d] is %f\n", i, fabs(weights[i]));
-            resetWeights = 1; // 참
-            break;
-        }
-    }
-    if (resetWeights) {
-        for (int i = 0; i < FILTER_LENGTH; i++) {
-            weights[i] = 0.0f; // 필터 계수를 0으로 초기화
-        }
-        inst->adapted = 0;
-        inst->sum_adapt = 0;
-        printf("Weights reset to prevent divergence.\n");
-    }
+//     // 필터 계수 발산 방지
+//     int resetWeights = 0; // 초기값: 0 (거짓)
+//     for (int i = 0; i < FILTER_LENGTH; i++) {
+//         if (fabs(weights[i]) > WEIGHT_THRESHOLD || isnan(weights[i])) {
+//             printf("Weights[%d] is %f\n", i, fabs(weights[i]));
+//             resetWeights = 1; // 참
+//             break;
+//         }
+//     }
+//     if (resetWeights) {
+//         for (int i = 0; i < FILTER_LENGTH; i++) {
+//             weights[i] = 0.0f; // 필터 계수를 0으로 초기화
+//         }
+//         inst->adapted = 0;
+//         inst->sum_adapt = 0;
+//         printf("Weights reset to prevent divergence.\n");
+//     }
 
-    // 감쇄량 계산
+//     // 감쇄량 계산
 
-    float errorPower = calculate_rms_int32((int16_t *)errorSignal, length);
-    *prevAttenuation = 20.0f * log10f(micPower / (errorPower + 1));
+//     float errorPower = calculate_rms_int32((int16_t *)errorSignal, length);
+//     *prevAttenuation = 20.0f * log10f(micPower / (errorPower + 1));
 
-    if (updateon==1) {
-        float tmp = Sxx;
-        if (tmp>See){
-            tmp = See;
-        }
-        inst->adapt_rate = 0.25* tmp / (See+1);
-        inst->sum_adapt += inst->adapt_rate;
-    }
+//     if (updateon==1) {
+//         float tmp = Sxx;
+//         if (tmp>See){
+//             tmp = See;
+//         }
+//         inst->adapt_rate = 0.25* tmp / (See+1);
+//         inst->sum_adapt += inst->adapt_rate;
+//     }
 
-    if (!inst->adapted && inst->sum_adapt > 7 && *prevAttenuation > 20.0f)
-    {    
-        inst->adapted = 1;
-    }
+//     if (!inst->adapted && inst->sum_adapt > 7 && *prevAttenuation > 20.0f)
+//     {    
+//         inst->adapted = 1;
+//     }
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[6] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[6] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        total_end = clock();
-        totalRunTime += ((double)(total_end - total_start)) / CLOCKS_PER_SEC;
+// #ifdef ENABLE_PROFILING2
+//         total_end = clock();
+//         totalRunTime += ((double)(total_end - total_start)) / CLOCKS_PER_SEC;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-    // 평균 시간 출력
-    count++;
-    if (totalRunTime >= PRINT_INTERVAL) {
-        printf("Average execution time for each step (1-second intervals):\n");
-        for (int i = 0; i < NUM_STEPS; i++) {
-            double averageTime = totalTime[i] / count;
-            double percentage = (totalTime[i] / totalRunTime) * 100.0;
-            printf("Step %d: Average Time = %.2f milli seconds, Percentage = %f%%\n", i + 1, averageTime* 1000, percentage);
-        }
-        // 총 실행 시간 및 각 단계별 누적 시간 초기화
-        totalRunTime = 0.0;
-        for (int i = 0; i < NUM_STEPS; i++) {
-            totalTime[i] = 0.0;
-        }
-        count = 0; // 카운트 초기화
-    }
-#endif
+// #ifdef ENABLE_PROFILING2
+//     // 평균 시간 출력
+//     count++;
+//     if (totalRunTime >= PRINT_INTERVAL) {
+//         printf("Average execution time for each step (1-second intervals):\n");
+//         for (int i = 0; i < NUM_STEPS; i++) {
+//             double averageTime = totalTime[i] / count;
+//             double percentage = (totalTime[i] / totalRunTime) * 100.0;
+//             printf("Step %d: Average Time = %.2f milli seconds, Percentage = %f%%\n", i + 1, averageTime* 1000, percentage);
+//         }
+//         // 총 실행 시간 및 각 단계별 누적 시간 초기화
+//         totalRunTime = 0.0;
+//         for (int i = 0; i < NUM_STEPS; i++) {
+//             totalTime[i] = 0.0;
+//         }
+//         count = 0; // 카운트 초기화
+//     }
+// #endif
 
 
-#ifdef DEBUG_AEC
-	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
+// #ifdef DEBUG_AEC
+// 	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
        
-        FloatPacket packet;
-        // packet.val1 = (float)((Sff-See)*fabsf(Sff-See));
-        // packet.val2 = (float)(Sff*Dbf);
-        // packet.val3 = (float)((inst->Davg1)*fabsf(inst->Davg1));
-        // packet.val4 = (float)(0.5*inst->Dvar1);
-        // packet.val5 = (float)((inst->Davg2)*fabsf(inst->Davg2));
-        // packet.val6 = (float)(0.25*inst->Dvar2);
+//         FloatPacket packet;
+//         // packet.val1 = (float)((Sff-See)*fabsf(Sff-See));
+//         // packet.val2 = (float)(Sff*Dbf);
+//         // packet.val3 = (float)((inst->Davg1)*fabsf(inst->Davg1));
+//         // packet.val4 = (float)(0.5*inst->Dvar1);
+//         // packet.val5 = (float)((inst->Davg2)*fabsf(inst->Davg2));
+//         // packet.val6 = (float)(0.25*inst->Dvar2);
 
-        packet.val1 = (float)calculate_rms_int32((int16_t *)refSignal, length);
-        packet.val2 = (float)micPower;
-        packet.val3 = (float)micPower;
-        packet.val4 = (float)errorPower;
-        packet.val5 = (float)inst->sum_adapt;
-        packet.val6 = (float)inst->adapt_rate;        
+//         packet.val1 = (float)calculate_rms_int32((int16_t *)refSignal, length);
+//         packet.val2 = (float)micPower;
+//         packet.val3 = (float)micPower;
+//         packet.val4 = (float)errorPower;
+//         packet.val5 = (float)inst->sum_adapt;
+//         packet.val6 = (float)inst->adapt_rate;        
 
-        debug_matlab_ssl_float_packet_send(8, packet);
-        debug_matlab_int_array_send(9, &weightsQ15[0], FILTER_LENGTH);
-        // debug_matlab_int_array_send(9, &w_real_Q33[0], FILTER_LENGTH);
+//         debug_matlab_ssl_float_packet_send(8, packet);
+//         debug_matlab_int_array_send(9, &weightsQ15[0], FILTER_LENGTH);
+//         // debug_matlab_int_array_send(9, &w_real_Q33[0], FILTER_LENGTH);
 
-        debug_matlab_ssl_float_send(10, (*prevAttenuation));
-        // debug_matlab_ssl_float_send(10, e_mu_temp*8.5899e+09);
-        // debug_matlab_ssl_float_send(10, (float)n_e_mu_Q23);
+//         debug_matlab_ssl_float_send(10, (*prevAttenuation));
+//         // debug_matlab_ssl_float_send(10, e_mu_temp*8.5899e+09);
+//         // debug_matlab_ssl_float_send(10, (float)n_e_mu_Q23);
 
-        // debug_matlab_ssl_float_send(10, (Dbf));
-    }
+//         // debug_matlab_ssl_float_send(10, (Dbf));
+//     }
 
-	if ((g_aec_debug_on==1)&&(inst->chan_num==0)){
-		g_aec_debug_snd_idx++;
-		if (g_aec_debug_snd_idx>=g_aec_debug_snd_period) {
-			g_aec_debug_snd_idx = 0;
-		}
-	}
-#endif 
+// 	if ((g_aec_debug_on==1)&&(inst->chan_num==0)){
+// 		g_aec_debug_snd_idx++;
+// 		if (g_aec_debug_snd_idx>=g_aec_debug_snd_period) {
+// 			g_aec_debug_snd_idx = 0;
+// 		}
+// 	}
+// #endif 
 
-}
+// }
 
-// NLMS 에코 캔슬러 함수 (필터 가중치 업데이트는 플로팅 연산)
-void nlms_echo_canceller_two_path_strong(aecInst_t *aecInst, int16_t *refSignal, int16_t *micSignal, float *weights, float *weights_fore, float *leaky, int16_t *errorSignal, int32_t *x, float refPower, float *prevAttenuation, int length, int updateon) {
+// // NLMS 에코 캔슬러 함수 (필터 가중치 업데이트는 플로팅 연산)
+// void nlms_echo_canceller_two_path_strong(aecInst_t *aecInst, int16_t *refSignal, int16_t *micSignal, float *weights, float *weights_fore, float *leaky, int16_t *errorSignal, int32_t *x, float refPower, float *prevAttenuation, int length, int updateon) {
 
-    aecInst_t *inst = (aecInst_t *)aecInst;
+//     aecInst_t *inst = (aecInst_t *)aecInst;
 
-    const float WEIGHT_THRESHOLD = 10.0f; // 필터 가중치의 상한 값
+//     const float WEIGHT_THRESHOLD = 10.0f; // 필터 가중치의 상한 값
 
-    int32_t weightsQ15[FILTER_LENGTH];
-    int32_t error_fore[FRAME_SIZE];
-    int32_t error_back[FRAME_SIZE];
-    int32_t y_fore[FRAME_SIZE];
-    int32_t y_back[FRAME_SIZE];
-    float *trans_window = &inst->trans_window1024[0];
+//     int32_t weightsQ15[FILTER_LENGTH];
+//     int32_t error_fore[FRAME_SIZE];
+//     int32_t error_back[FRAME_SIZE];
+//     int32_t y_fore[FRAME_SIZE];
+//     int32_t y_back[FRAME_SIZE];
+//     float *trans_window = &inst->trans_window1024[0];
 
-    float weights_slow[FILTER_LENGTH];
-    int32_t n_x_Q15[FILTER_LENGTH];
+//     float weights_slow[FILTER_LENGTH];
+//     int32_t n_x_Q15[FILTER_LENGTH];
 
-    float e_mu_temp = 0;
-    int32_t n_e_mu_Q23 = 0;
+//     float e_mu_temp = 0;
+//     int32_t n_e_mu_Q23 = 0;
 
 
-    if (length == 1024) {
-        trans_window = &inst->trans_window1024[0];
-    } else if (length == 1600) {
-        trans_window = &inst->trans_window1600[0];
-    } else if (length == 512) {
-        trans_window = &inst->trans_window512[0];
-    } else if (length == 256) {
-        trans_window = &inst->trans_window256[0];             
-    } else {
+//     if (length == 1024) {
+//         trans_window = &inst->trans_window1024[0];
+//     } else if (length == 1600) {
+//         trans_window = &inst->trans_window1600[0];
+//     } else if (length == 512) {
+//         trans_window = &inst->trans_window512[0];
+//     } else if (length == 256) {
+//         trans_window = &inst->trans_window256[0];             
+//     } else {
 
-        for (int i = 0; i < length * 2; i++) {
-            inst->trans_window1600[i] = .5 - .5 * cos(2 * M_PI * i / (length * 2));        
-        }
+//         for (int i = 0; i < length * 2; i++) {
+//             inst->trans_window1600[i] = .5 - .5 * cos(2 * M_PI * i / (length * 2));        
+//         }
             
-        trans_window = &inst->trans_window1600[0];
-    }
+//         trans_window = &inst->trans_window1600[0];
+//     }
 
-#ifdef ENABLE_PROFILING2
-        total_start = clock();
-#endif
+// #ifdef ENABLE_PROFILING2
+//         total_start = clock();
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif          
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif          
 
-    for (int n=0; n<FILTER_LENGTH-1; n++){
-        x[n]=x[n+length];
-    }
+//     for (int n=0; n<FILTER_LENGTH-1; n++){
+//         x[n]=x[n+length];
+//     }
 
-    for (int n=0; n<length; n++){
-        x[n+FILTER_LENGTH-1]=refSignal[n];
-    }
+//     for (int n=0; n<length; n++){
+//         x[n+FILTER_LENGTH-1]=refSignal[n];
+//     }
 
-    // Foreground filtering
-    for (int i = 0; i < FILTER_LENGTH; i++) {
-        weightsQ15[i] = (int32_t)(weights_fore[i] * 32768.0f);
-    }    
+//     // Foreground filtering
+//     for (int i = 0; i < FILTER_LENGTH; i++) {
+//         weightsQ15[i] = (int32_t)(weights_fore[i] * 32768.0f);
+//     }    
 
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[0] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[0] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif          
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif          
 
-    for (int n = 0; n < length; n++) {
+//     for (int n = 0; n < length; n++) {
 
-        int curidx=FILTER_LENGTH-1+n;
+//         int curidx=FILTER_LENGTH-1+n;
        
-        int32_t y = 16384;
-        int m = curidx;
-        for (int i = 0; i < FILTER_LENGTH; i++) {
-            y += (weightsQ15[i] * x[m--]);
-            // m--;
-        }
+//         int32_t y = 16384;
+//         int m = curidx;
+//         for (int i = 0; i < FILTER_LENGTH; i++) {
+//             y += (weightsQ15[i] * x[m--]);
+//             // m--;
+//         }
 
-        y = y>>15;
+//         y = y>>15;
 
-        y_fore[n] = y;
+//         y_fore[n] = y;
 
-        // 잔차 신호 계산
-        int32_t e = (micSignal[n] -  y);
-        error_fore[n] = e;
-    }
+//         // 잔차 신호 계산
+//         int32_t e = (micSignal[n] -  y);
+//         error_fore[n] = e;
+//     }
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[1] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[1] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif          
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif          
 
-    // Calc foreground filter residual power
-    float Sff = 0.0f;
-    for (int n = 0; n < length; n++) {
-        Sff += (float)(error_fore[n] * error_fore[n]);
-    }
+//     // Calc foreground filter residual power
+//     float Sff = 0.0f;
+//     for (int n = 0; n < length; n++) {
+//         Sff += (float)(error_fore[n] * error_fore[n]);
+//     }
 
-    // Calc foreground filter residual power
-    float Sxx = 0.0f;
-    for (int n = 0; n < length; n++) {
-        Sxx += (float)((int32_t)refSignal[n] * (int32_t)refSignal[n]);
-    }
+//     // Calc foreground filter residual power
+//     float Sxx = 0.0f;
+//     for (int n = 0; n < length; n++) {
+//         Sxx += (float)((int32_t)refSignal[n] * (int32_t)refSignal[n]);
+//     }
 
-    // Calc foreground filter residual power
-    float Sdd = 0.0f;
-    for (int n = 0; n < length; n++) {
-        Sdd += (float)((int32_t)micSignal[n] * (int32_t)micSignal[n]);
-    }
-    float micPower = sqrtf(Sdd / (float)length);
+//     // Calc foreground filter residual power
+//     float Sdd = 0.0f;
+//     for (int n = 0; n < length; n++) {
+//         Sdd += (float)((int32_t)micSignal[n] * (int32_t)micSignal[n]);
+//     }
+//     float micPower = sqrtf(Sdd / (float)length);
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[2] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[2] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif      
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif      
 
-    float normFactor = 500.0f;
-    for (int n=0; n<FILTER_LENGTH; n++){
-        normFactor += (float)(x[n+length-1] * x[n+length-1]);
-    }
+//     float normFactor = 500.0f;
+//     for (int n=0; n<FILTER_LENGTH; n++){
+//         normFactor += (float)(x[n+length-1] * x[n+length-1]);
+//     }
 
-#ifdef fixed_point_aec
-    int32_t half_normFactor = 3000;
-    for (int n=0; n<FILTER_LENGTH; n++){
-        half_normFactor += abs(x[n+length-1]);
-    }
+// #ifdef fixed_point_aec
+//     int32_t half_normFactor = 3000;
+//     for (int n=0; n<FILTER_LENGTH; n++){
+//         half_normFactor += abs(x[n+length-1]);
+//     }
 
-    int32_t Q28MAX = 268435456;
-    float half_norm_inv_Q28f = (float)(Q28MAX) / (float)half_normFactor;
-    float mu_Q15f = STEP_SIZE * Q15_MAXf;
-    int32_t n_mu_Q28 = (int32_t)(half_norm_inv_Q28f * mu_Q15f)>>15;
-#endif
+//     int32_t Q28MAX = 268435456;
+//     float half_norm_inv_Q28f = (float)(Q28MAX) / (float)half_normFactor;
+//     float mu_Q15f = STEP_SIZE * Q15_MAXf;
+//     int32_t n_mu_Q28 = (int32_t)(half_norm_inv_Q28f * mu_Q15f)>>15;
+// #endif
 
-    float step_size1000 = STEP_SIZE * 10000;
+//     float step_size1000 = STEP_SIZE * 10000;
 
-    float mu;
-    // 스텝 크기 조정
-    if (updateon==1) {
-        mu = (*prevAttenuation > 15.0f || refPower < -50.0f || inst->adapted) ? 0.1f * step_size1000 / normFactor : step_size1000 / normFactor;
-        // n_mu_Q28 = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? n_mu_Q28>>3 : n_mu_Q28;
-    } else {
-        mu = 0.1f * step_size1000 / normFactor;
-        // n_mu_Q28 = n_mu_Q28>>3;        
-    }
-    // printf("normFactor=%f mu=%f\r\n", normFactor, mu);
+//     float mu;
+//     // 스텝 크기 조정
+//     if (updateon==1) {
+//         mu = (*prevAttenuation > 15.0f || refPower < -50.0f || inst->adapted) ? 0.1f * step_size1000 / normFactor : step_size1000 / normFactor;
+//         // n_mu_Q28 = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? n_mu_Q28>>3 : n_mu_Q28;
+//     } else {
+//         mu = 0.1f * step_size1000 / normFactor;
+//         // n_mu_Q28 = n_mu_Q28>>3;        
+//     }
+//     // printf("normFactor=%f mu=%f\r\n", normFactor, mu);
 
-    // float mu;
-    // // 스텝 크기 조정
-    // if (updateon==1) {
-    //     mu = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? 0.05f * STEP_SIZE / normFactor : STEP_SIZE / normFactor;
-    //     // n_mu_Q28 = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? n_mu_Q28>>3 : n_mu_Q28;
-    // } else {
-    //     mu = 0.05f * STEP_SIZE / normFactor;
-    //     // n_mu_Q28 = n_mu_Q28>>3;        
-    // }
-    // // printf("normFactor=%f mu=%f\r\n", normFactor, mu);
+//     // float mu;
+//     // // 스텝 크기 조정
+//     // if (updateon==1) {
+//     //     mu = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? 0.05f * STEP_SIZE / normFactor : STEP_SIZE / normFactor;
+//     //     // n_mu_Q28 = (*prevAttenuation > 25.0f || refPower < -50.0f || inst->adapted) ? n_mu_Q28>>3 : n_mu_Q28;
+//     // } else {
+//     //     mu = 0.05f * STEP_SIZE / normFactor;
+//     //     // n_mu_Q28 = n_mu_Q28>>3;        
+//     // }
+//     // // printf("normFactor=%f mu=%f\r\n", normFactor, mu);
 
-    float Attenuationtmp = *prevAttenuation;
+//     float Attenuationtmp = *prevAttenuation;
 
-    int itermax = 1;
-    if (inst->adapted==0 && Attenuationtmp <= 15.0f){
-        if (refPower > -40.0f ){
-            itermax = 5;
-        //     printf("itermax = 5\r\n");
-        // } else if (refPower > -40.0f ){
-        //     itermax = 4;
-        //     printf("itermax = 4\r\n");
-        // } else {
-        //     itermax = 3;
-        //     printf("itermax = 3\r\n");
-        }
-    }
+//     int itermax = 1;
+//     if (inst->adapted==0 && Attenuationtmp <= 15.0f){
+//         if (refPower > -40.0f ){
+//             itermax = 5;
+//         //     printf("itermax = 5\r\n");
+//         // } else if (refPower > -40.0f ){
+//         //     itermax = 4;
+//         //     printf("itermax = 4\r\n");
+//         // } else {
+//         //     itermax = 3;
+//         //     printf("itermax = 3\r\n");
+//         }
+//     }
 
-    for (int i = 0; i < FILTER_LENGTH; i++) {
-        weights_slow[i] = weights[i];
-    }
-    int filt_iter = FILTER_LENGTH;
+//     for (int i = 0; i < FILTER_LENGTH; i++) {
+//         weights_slow[i] = weights[i];
+//     }
+//     int filt_iter = FILTER_LENGTH;
 
-    float See = 0.0f;
-    for (int nn=0; nn<itermax; nn++){
-        if (nn>1) filt_iter = 300;
-        for (int n = 0; n < length; n++) {
+//     float See = 0.0f;
+//     for (int nn=0; nn<itermax; nn++){
+//         if (nn>1) filt_iter = 300;
+//         for (int n = 0; n < length; n++) {
 
-            int curidx=FILTER_LENGTH-1+n;
+//             int curidx=FILTER_LENGTH-1+n;
 
-            for (int i = 0; i < filt_iter; i++) {
-                weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
-            }
+//             for (int i = 0; i < filt_iter; i++) {
+//                 weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
+//             }
 
-            int32_t y = 16384;
-            int m = curidx;
-            for (int i = 0; i < filt_iter; i++) {
-                y += (weightsQ15[i] * x[m--]);
-                // y += ((w_real_Q33[i]+128)>>8 * x[m--]);
-            }
+//             int32_t y = 16384;
+//             int m = curidx;
+//             for (int i = 0; i < filt_iter; i++) {
+//                 y += (weightsQ15[i] * x[m--]);
+//                 // y += ((w_real_Q33[i]+128)>>8 * x[m--]);
+//             }
 
-#ifdef fixed_point_aec
-            // filtering
-            int32_t temp_real=16384; // (1<<14)
-            m=curidx;
-            for (int k=0; k<FILTER_LENGTH; k++){
-                temp_real=temp_real + (((w_real_Q33[k]+128)>>8) * (int32_t)(x[m]));
-                m--;
-            }      
+// #ifdef fixed_point_aec
+//             // filtering
+//             int32_t temp_real=16384; // (1<<14)
+//             m=curidx;
+//             for (int k=0; k<FILTER_LENGTH; k++){
+//                 temp_real=temp_real + (((w_real_Q33[k]+128)>>8) * (int32_t)(x[m]));
+//                 m--;
+//             }      
 
-            int32_t y =  temp_real>>15;      
-#endif
-            y = y>>15;
+//             int32_t y =  temp_real>>15;      
+// #endif
+//             y = y>>15;
 
-            y_back[n] = y;
+//             y_back[n] = y;
 
-            // 잔차 신호 계산
-            int32_t e = micSignal[n] -  y;
-            error_back[n] = e;
+//             // 잔차 신호 계산
+//             int32_t e = micSignal[n] -  y;
+//             error_back[n] = e;
 
-#ifdef fixed_point_aec            
-            n_e_mu_Q23 = (n_mu_Q28 * e + 32)>>5;            
+// #ifdef fixed_point_aec            
+//             n_e_mu_Q23 = (n_mu_Q28 * e + 32)>>5;            
 
-            m = curidx;
-            for (int i = 0; i < filt_iter; i++) {
-                n_x_Q15[i] = (int32_t)((float)x[m]*half_norm_inv_Q28f)>>13;
-                m--;
-            }
-#endif            
+//             m = curidx;
+//             for (int i = 0; i < filt_iter; i++) {
+//                 n_x_Q15[i] = (int32_t)((float)x[m]*half_norm_inv_Q28f)>>13;
+//                 m--;
+//             }
+// #endif            
 
-            if (updateon==1) {
+//             if (updateon==1) {
 
-                e_mu_temp = mu * e;
-#ifdef fixed_point_aec
-                double temp_d = (double)e_mu_temp * (8.589934592000000e+09);
-                int32_t n_e_mu_Q33 = (int32_t)(temp_d);
-#endif
-                m = curidx;
-                for (int i = 0; i < filt_iter; i++) {
-                    if (inst->adapted){
-                        weights[i] = weights[i] + (e_mu_temp * ((float)x[m]*0.0001)) * inst->prod[i];
-                    } else {
-                        weights[i] = weights[i] + e_mu_temp * ((float)x[m]*0.0001);
-                    }
-                    m--;
-#ifdef fixed_point_aec
-                    int32_t temp_real = n_e_mu_Q33*(int)(x[m]) + 512; //Q23
-                    w_real_Q33[i] = w_real_Q33[i] + (temp_real>>10);
-#endif                    
-                }
-            } 
-        }
+//                 e_mu_temp = mu * e;
+// #ifdef fixed_point_aec
+//                 double temp_d = (double)e_mu_temp * (8.589934592000000e+09);
+//                 int32_t n_e_mu_Q33 = (int32_t)(temp_d);
+// #endif
+//                 m = curidx;
+//                 for (int i = 0; i < filt_iter; i++) {
+//                     if (inst->adapted){
+//                         weights[i] = weights[i] + (e_mu_temp * ((float)x[m]*0.0001)) * inst->prod[i];
+//                     } else {
+//                         weights[i] = weights[i] + e_mu_temp * ((float)x[m]*0.0001);
+//                     }
+//                     m--;
+// #ifdef fixed_point_aec
+//                     int32_t temp_real = n_e_mu_Q33*(int)(x[m]) + 512; //Q23
+//                     w_real_Q33[i] = w_real_Q33[i] + (temp_real>>10);
+// #endif                    
+//                 }
+//             } 
+//         }
 
-        for (int i = 0; i < filt_iter; i++) {
-            weights_slow[i] = weights_slow[i] * 0.99 + weights[i] * 0.01;
-        }        
+//         for (int i = 0; i < filt_iter; i++) {
+//             weights_slow[i] = weights_slow[i] * 0.99 + weights[i] * 0.01;
+//         }        
 
-        // mu *= 0.7;s
+//         // mu *= 0.7;s
 
-        // Calc foreground filter residual power
-        See = 0.0f;
-        for (int n = 0; n < length; n++) {
-            See += (float)(error_back[n] * error_back[n]);
-        }
+//         // Calc foreground filter residual power
+//         See = 0.0f;
+//         for (int n = 0; n < length; n++) {
+//             See += (float)(error_back[n] * error_back[n]);
+//         }
 
-        float errorPowertemp = sqrtf(See / (float)length);
-        Attenuationtmp = 20.0f * log10f(micPower / (errorPowertemp + 1));  
+//         float errorPowertemp = sqrtf(See / (float)length);
+//         Attenuationtmp = 20.0f * log10f(micPower / (errorPowertemp + 1));  
 
-        if (Attenuationtmp>20.0f) break;
-    }    
+//         if (Attenuationtmp>20.0f) break;
+//     }    
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[3] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[3] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif      
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif      
 
 
-    int32_t dbf[FRAME_SIZE];
-    // Calc power of Difference in response
-    for (int n = 0; n < length; n++) {
-        dbf[n]=y_fore[n]-y_back[n];
-    }
+//     int32_t dbf[FRAME_SIZE];
+//     // Calc power of Difference in response
+//     for (int n = 0; n < length; n++) {
+//         dbf[n]=y_fore[n]-y_back[n];
+//     }
 
-    float Dbf = 0.0f;
-    for (int n = 0; n < length; n++) {
-        Dbf += (float)dbf[n] * (float)dbf[n];
-    }
+//     float Dbf = 0.0f;
+//     for (int n = 0; n < length; n++) {
+//         Dbf += (float)dbf[n] * (float)dbf[n];
+//     }
 
-    inst->Davg1 = .6*inst->Davg1 + .4*(Sff-See);
-    inst->Davg2 = .85*inst->Davg2 + .15*(Sff-See);
-    inst->Dvar1 = .36*inst->Dvar1 + .16*Sff*Dbf;
-    inst->Dvar2 = .7225*inst->Dvar2 + .0225*Sff*Dbf;
+//     inst->Davg1 = .6*inst->Davg1 + .4*(Sff-See);
+//     inst->Davg2 = .85*inst->Davg2 + .15*(Sff-See);
+//     inst->Dvar1 = .36*inst->Dvar1 + .16*Sff*Dbf;
+//     inst->Dvar2 = .7225*inst->Dvar2 + .0225*Sff*Dbf;
 
-    inst->update_fore = 0;
-    if ((Sff-See)*fabsf(Sff-See) > Sff*Dbf) inst->update_fore = 1;
-    if ((inst->Davg1)*fabsf(inst->Davg1) > 0.5*inst->Dvar1) inst->update_fore = 2;
-    if ((inst->Davg2)*fabsf(inst->Davg2) > 0.25*inst->Dvar2) inst->update_fore = 3;
+//     inst->update_fore = 0;
+//     if ((Sff-See)*fabsf(Sff-See) > Sff*Dbf) inst->update_fore = 1;
+//     if ((inst->Davg1)*fabsf(inst->Davg1) > 0.5*inst->Dvar1) inst->update_fore = 2;
+//     if ((inst->Davg2)*fabsf(inst->Davg2) > 0.25*inst->Dvar2) inst->update_fore = 3;
 
-    for (int n = 0; n < length; n++) {
-        errorSignal[n]=(int16_t)error_fore[n];
-    }
+//     for (int n = 0; n < length; n++) {
+//         errorSignal[n]=(int16_t)error_fore[n];
+//     }
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[4] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[4] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif   
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif   
     
-    if (inst->update_fore) {
-        for (int i = 0; i < FILTER_LENGTH; i++) {
-            // weights_fore[i] = weights_fore[i]*0.75 + weights[i]* 0.25; // 필터 계수를 0으로 초기화
-            // weights_fore[i] = weights[i];
-            weights_fore[i] = weights_slow[i];
-#ifdef fixed_point_aec            
-            weights_fore[i] = ((float)w_real_Q33[i] * 1.1921e-07);
-#endif        
-        }
+//     if (inst->update_fore) {
+//         for (int i = 0; i < FILTER_LENGTH; i++) {
+//             // weights_fore[i] = weights_fore[i]*0.75 + weights[i]* 0.25; // 필터 계수를 0으로 초기화
+//             // weights_fore[i] = weights[i];
+//             weights_fore[i] = weights_slow[i];
+// #ifdef fixed_point_aec            
+//             weights_fore[i] = ((float)w_real_Q33[i] * 1.1921e-07);
+// #endif        
+//         }
 
-        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
-            for (int i = 0; i < FILTER_LENGTH; i++) {
-                weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
-            }
-        }
+//         if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
+//             for (int i = 0; i < FILTER_LENGTH; i++) {
+//                 weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
+//             }
+//         }
 
-        inst->Davg1 = 0.0;
-        inst->Davg2 = 0.0;
-        inst->Dvar1 = 0.0;
-        inst->Dvar2 = 0.0;        
+//         inst->Davg1 = 0.0;
+//         inst->Davg2 = 0.0;
+//         inst->Dvar1 = 0.0;
+//         inst->Dvar2 = 0.0;        
 
-        for (int n = 0; n < length; n++) {
-            errorSignal[n]=(int16_t)((float)micSignal[n] - ((float)y_back[n]*trans_window[n] + (float)y_fore[n]*trans_window[n+length]));
-            // errorSignal[n]=(int16_t)error_back[n];
-        }
-        // printf("update fore = %d\n", inst->update_fore);
+//         for (int n = 0; n < length; n++) {
+//             errorSignal[n]=(int16_t)((float)micSignal[n] - ((float)y_back[n]*trans_window[n] + (float)y_fore[n]*trans_window[n+length]));
+//             // errorSignal[n]=(int16_t)error_back[n];
+//         }
+//         // printf("update fore = %d\n", inst->update_fore);
 
-    } else {
-        int reset_back = 0;
-        if (-1.0*(Sff-See)*fabsf(Sff-See) > 4.0*Sff*Dbf) reset_back = 1;
-        if (-1.0*(inst->Davg1)*fabsf(inst->Davg1) > 4.0*inst->Dvar1) reset_back = 1;
-        if (-1.0*(inst->Davg2)*fabsf(inst->Davg2) > 4.0*inst->Dvar2) reset_back = 1;
+//     } else {
+//         int reset_back = 0;
+//         if (-1.0*(Sff-See)*fabsf(Sff-See) > 4.0*Sff*Dbf) reset_back = 1;
+//         if (-1.0*(inst->Davg1)*fabsf(inst->Davg1) > 4.0*inst->Dvar1) reset_back = 1;
+//         if (-1.0*(inst->Davg2)*fabsf(inst->Davg2) > 4.0*inst->Dvar2) reset_back = 1;
 
-        if (reset_back) {
-            for (int i = 0; i < FILTER_LENGTH; i++) {
-                weights[i] = weights_fore[i]; // 필터 계수를 0으로 초기화
-            }
+//         if (reset_back) {
+//             for (int i = 0; i < FILTER_LENGTH; i++) {
+//                 weights[i] = weights_fore[i]; // 필터 계수를 0으로 초기화
+//             }
 
-            See = Sff;
-            inst->Davg1 = 0.0;
-            inst->Davg2 = 0.0;
-            inst->Dvar1 = 0.0;
-            inst->Dvar2 = 0.0;
+//             See = Sff;
+//             inst->Davg1 = 0.0;
+//             inst->Davg2 = 0.0;
+//             inst->Dvar1 = 0.0;
+//             inst->Dvar2 = 0.0;
 
-	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
-                for (int i = 0; i < FILTER_LENGTH; i++) {
-                    weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
-                }                
-            }
+// 	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
+//                 for (int i = 0; i < FILTER_LENGTH; i++) {
+//                     weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
+//                 }                
+//             }
 
-            // printf("reset back\n");
-        }  else {
-	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){            
-                for (int i = 0; i < FILTER_LENGTH; i++) {
-                    weightsQ15[i] = (int32_t)(weights_fore[i] * 32768.0f);
-                }                
-            }
-            // printf("just go\n");
-        }      
-    }  
+//             // printf("reset back\n");
+//         }  else {
+// 	        if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){            
+//                 for (int i = 0; i < FILTER_LENGTH; i++) {
+//                     weightsQ15[i] = (int32_t)(weights_fore[i] * 32768.0f);
+//                 }                
+//             }
+//             // printf("just go\n");
+//         }      
+//     }  
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[5] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[5] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        start = clock();
-#endif   
+// #ifdef ENABLE_PROFILING2
+//         start = clock();
+// #endif   
 
-    // 필터 계수 발산 방지
-    int resetWeights = 0; // 초기값: 0 (거짓)
-    for (int i = 0; i < FILTER_LENGTH; i++) {
-        if (fabs(weights[i]) > WEIGHT_THRESHOLD || isnan(weights[i])) {
-            printf("inst= %d, Weights[%d] is %f\n", inst->chan_num, i, fabs(weights[i]));
-            resetWeights = 1; // 참
-            break;
-        }
-    }
-    if (resetWeights) {
-        for (int i = 0; i < FILTER_LENGTH; i++) {
-            weights[i] = weights_fore[i]; // 필터 계수를 0으로 초기화
-        }
-        inst->adapted = 0;
-        inst->sum_adapt = 0;
-        printf("Weights reset to prevent divergence.\n");
-    }
+//     // 필터 계수 발산 방지
+//     int resetWeights = 0; // 초기값: 0 (거짓)
+//     for (int i = 0; i < FILTER_LENGTH; i++) {
+//         if (fabs(weights[i]) > WEIGHT_THRESHOLD || isnan(weights[i])) {
+//             printf("inst= %d, Weights[%d] is %f\n", inst->chan_num, i, fabs(weights[i]));
+//             resetWeights = 1; // 참
+//             break;
+//         }
+//     }
+//     if (resetWeights) {
+//         for (int i = 0; i < FILTER_LENGTH; i++) {
+//             weights[i] = weights_fore[i]; // 필터 계수를 0으로 초기화
+//         }
+//         inst->adapted = 0;
+//         inst->sum_adapt = 0;
+//         printf("Weights reset to prevent divergence.\n");
+//     }
 
-    // 감쇄량 계산
+//     // 감쇄량 계산
 
-    float errorPower = calculate_rms_int32((int16_t *)errorSignal, length);
-    *prevAttenuation = 20.0f * log10f(micPower / (errorPower + 1));
+//     float errorPower = calculate_rms_int32((int16_t *)errorSignal, length);
+//     *prevAttenuation = 20.0f * log10f(micPower / (errorPower + 1));
 
-    if (updateon==1) {
-        float tmp = Sxx;
-        if (tmp>See){
-            tmp = See;
-        }
-        inst->adapt_rate = 0.25* tmp / (See+1);
-        inst->sum_adapt += inst->adapt_rate;
-    }
+//     if (updateon==1) {
+//         float tmp = Sxx;
+//         if (tmp>See){
+//             tmp = See;
+//         }
+//         inst->adapt_rate = 0.25* tmp / (See+1);
+//         inst->sum_adapt += inst->adapt_rate;
+//     }
 
-    if (!inst->adapted && inst->sum_adapt > 15 && *prevAttenuation > 15.0f)
-    {    
-        inst->adapted = 1;
+//     if (!inst->adapted && inst->sum_adapt > 15 && *prevAttenuation > 15.0f)
+//     {    
+//         inst->adapted = 1;
 
-        calc_prod(inst->prod, weights_fore, FILTER_LENGTH);
+//         calc_prod(inst->prod, weights_fore, FILTER_LENGTH);
 
-    }
+//     }
 
-#ifdef ENABLE_PROFILING2
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[6] += stepTime;
+// #ifdef ENABLE_PROFILING2
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[6] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-        total_end = clock();
-        totalRunTime += ((double)(total_end - total_start)) / CLOCKS_PER_SEC;
+// #ifdef ENABLE_PROFILING2
+//         total_end = clock();
+//         totalRunTime += ((double)(total_end - total_start)) / CLOCKS_PER_SEC;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING2
-    // 평균 시간 출력
-    count++;
-    if (totalRunTime >= PRINT_INTERVAL) {
-        printf("Average execution time for each step (1-second intervals):\n");
-        for (int i = 0; i < NUM_STEPS; i++) {
-            double averageTime = totalTime[i] / count;
-            double percentage = (totalTime[i] / totalRunTime) * 100.0;
-            printf("Step %d: Average Time = %.2f milli seconds, Percentage = %f%%\n", i + 1, averageTime* 1000, percentage);
-        }
-        // 총 실행 시간 및 각 단계별 누적 시간 초기화
-        totalRunTime = 0.0;
-        for (int i = 0; i < NUM_STEPS; i++) {
-            totalTime[i] = 0.0;
-        }
-        count = 0; // 카운트 초기화
-    }
-#endif
+// #ifdef ENABLE_PROFILING2
+//     // 평균 시간 출력
+//     count++;
+//     if (totalRunTime >= PRINT_INTERVAL) {
+//         printf("Average execution time for each step (1-second intervals):\n");
+//         for (int i = 0; i < NUM_STEPS; i++) {
+//             double averageTime = totalTime[i] / count;
+//             double percentage = (totalTime[i] / totalRunTime) * 100.0;
+//             printf("Step %d: Average Time = %.2f milli seconds, Percentage = %f%%\n", i + 1, averageTime* 1000, percentage);
+//         }
+//         // 총 실행 시간 및 각 단계별 누적 시간 초기화
+//         totalRunTime = 0.0;
+//         for (int i = 0; i < NUM_STEPS; i++) {
+//             totalTime[i] = 0.0;
+//         }
+//         count = 0; // 카운트 초기화
+//     }
+// #endif
 
 
-#ifdef DEBUG_AEC
-	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
+// #ifdef DEBUG_AEC
+// 	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
        
-        FloatPacket packet;
-        // packet.val1 = (float)((Sff-See)*fabsf(Sff-See));
-        // packet.val2 = (float)(Sff*Dbf);
-        // packet.val3 = (float)((inst->Davg1)*fabsf(inst->Davg1));
-        // packet.val4 = (float)(0.5*inst->Dvar1);
-        // packet.val5 = (float)((inst->Davg2)*fabsf(inst->Davg2));
-        // packet.val6 = (float)(0.25*inst->Dvar2);
+//         FloatPacket packet;
+//         // packet.val1 = (float)((Sff-See)*fabsf(Sff-See));
+//         // packet.val2 = (float)(Sff*Dbf);
+//         // packet.val3 = (float)((inst->Davg1)*fabsf(inst->Davg1));
+//         // packet.val4 = (float)(0.5*inst->Dvar1);
+//         // packet.val5 = (float)((inst->Davg2)*fabsf(inst->Davg2));
+//         // packet.val6 = (float)(0.25*inst->Dvar2);
 
-        packet.val1 = (float)calculate_rms_int32((int16_t *)refSignal, length);
-        packet.val2 = (float)micPower;
-        packet.val3 = (float)micPower;
-        packet.val4 = (float)errorPower;
-        packet.val5 = (float)inst->sum_adapt;
-        packet.val6 = (float)inst->adapt_rate;        
+//         packet.val1 = (float)calculate_rms_int32((int16_t *)refSignal, length);
+//         packet.val2 = (float)micPower;
+//         packet.val3 = (float)micPower;
+//         packet.val4 = (float)errorPower;
+//         packet.val5 = (float)inst->sum_adapt;
+//         packet.val6 = (float)inst->adapt_rate;        
 
-        debug_matlab_ssl_float_packet_send(8, packet);
-        debug_matlab_int_array_send(9, &weightsQ15[0], FILTER_LENGTH);
-        // debug_matlab_int_array_send(9, &w_real_Q33[0], FILTER_LENGTH);
+//         debug_matlab_ssl_float_packet_send(8, packet);
+//         debug_matlab_int_array_send(9, &weightsQ15[0], FILTER_LENGTH);
+//         // debug_matlab_int_array_send(9, &w_real_Q33[0], FILTER_LENGTH);
 
-        debug_matlab_ssl_float_send(10, (*prevAttenuation));
-        // debug_matlab_ssl_float_send(10, e_mu_temp*8.5899e+09);
-        // debug_matlab_ssl_float_send(10, (float)n_e_mu_Q23);
+//         debug_matlab_ssl_float_send(10, (*prevAttenuation));
+//         // debug_matlab_ssl_float_send(10, e_mu_temp*8.5899e+09);
+//         // debug_matlab_ssl_float_send(10, (float)n_e_mu_Q23);
 
-        // debug_matlab_ssl_float_send(10, (Dbf));
-    }
+//         // debug_matlab_ssl_float_send(10, (Dbf));
+//     }
 
-	if ((g_aec_debug_on==1)&&(inst->chan_num==0)){
-		g_aec_debug_snd_idx++;
-		if (g_aec_debug_snd_idx>=g_aec_debug_snd_period) {
-			g_aec_debug_snd_idx = 0;
-		}
-	}
-#endif 
+// 	if ((g_aec_debug_on==1)&&(inst->chan_num==0)){
+// 		g_aec_debug_snd_idx++;
+// 		if (g_aec_debug_snd_idx>=g_aec_debug_snd_period) {
+// 			g_aec_debug_snd_idx = 0;
+// 		}
+// 	}
+// #endif 
 
-}
+// }
 
 // NLMS 에코 캔슬러 함수 (필터 가중치 업데이트는 플로팅 연산)
-void nlms_echo_canceller(aecInst_t *aecInst, int16_t *refSignal, int16_t *micSignal, float *weights, float *leaky, int16_t *errorSignal, int32_t *x, float refPower, float *prevAttenuation, int length, int updateon) {
-
+void nlms_echo_canceller(aecInst_t *aecInst, int16_t *refSignal, int16_t *micSignal, int32_t *weightsQ18, int16_t *errorSignal, int32_t *x, float refPowerdB, float *prevAttenuation, int length, int updateon) {
 
     aecInst_t *inst = (aecInst_t *)aecInst;
 
-    const float WEIGHT_THRESHOLD = 5.0f; // 필터 가중치의 상한 값
+    const int32_t WEIGHT_THRESHOLD = 1 * 262144; // 필터 가중치의 상한 값
 
     int32_t weightsQ15[FILTER_LENGTH];
+    int32_t n_e_Q17_temp = 0;
+    int32_t n_e_mu_Q24_temp = 0;
+    int32_t n_x_Q9_temp[FILTER_LENGTH];
+    int32_t offsetQ18[FILTER_LENGTH];
 
     for (int n=0; n<FILTER_LENGTH-1; n++){
         x[n]=x[n+length];
@@ -2396,74 +2427,49 @@ void nlms_echo_canceller(aecInst_t *aecInst, int16_t *refSignal, int16_t *micSig
     for (int n=0; n<length; n++){
         x[n+FILTER_LENGTH-1]=refSignal[n];
     }
-
-    float normFactor = 500.0f;
-    for (int n=0; n<FILTER_LENGTH; n++){
-        normFactor += (float)((int32_t)x[n+length-1] * (int32_t)x[n+length-1]);
-    }
+    
+    int32_t normFactor32 = inner_prod(&x[length-1], &x[length-1], FILTER_LENGTH);
+    int32_t normFactorinv_Q17 =   1048576 / ((int32_t)sqrtf((float)normFactor32)+1000);
 
     float mu;
     // 스텝 크기 조정
     if (updateon==1) {
-        mu = (*prevAttenuation > 25.0f || refPower < -40.0f) ? 0.5f * STEP_SIZE2 / normFactor : STEP_SIZE2 / normFactor;
+        mu = (*prevAttenuation > 10.0f || refPowerdB < -60.0f) ? 0.7f * STEP_SIZE : STEP_SIZE;
     } else {
-        mu = 0.05f * STEP_SIZE2 / normFactor;
+        mu = 0.05f * STEP_SIZE;
     }
+    int32_t mu_tapQ18 = (int32_t)(mu * 262144.0f / (float)FILTER_LENGTH);
 
-    int itermax = 1;
-    if (*prevAttenuation <= 25.0f){
-        if (refPower > -40.0f ){
-            itermax = 5;
+    for (int n = 0; n < length; n++) {
+
+        for (int i = 0; i < FILTER_LENGTH; i++) {
+            weightsQ15[i] = SHR(weightsQ18[i]+4, 3);
         }
-    }
 
-    int filt_iter = 150;
+        int32_t y = SHR(inner_prod(&weightsQ15[0], &x[n], FILTER_LENGTH)+16384, 9);
+        int16_t e = micSignal[n] - (int16_t)y;
+        errorSignal[n] = (int16_t)e;
 
-    for (int nn=0; nn<itermax; nn++){
-        if (nn==(itermax-1)) filt_iter = FILTER_LENGTH;
+        if (updateon==1) {
+            n_e_Q17_temp = normFactorinv_Q17 * (int32_t)e;
+            n_e_mu_Q24_temp = (n_e_Q17_temp * mu_tapQ18 + 1024)>>11;
 
-        for (int n = 0; n < length; n++) {
-
-            int curidx=FILTER_LENGTH-1+n;
-
-            for (int i = 0; i < filt_iter; i++) {
-                weightsQ15[i] = (int32_t)(weights[i] * 32768.0f);
+            for (int i = 0; i < FILTER_LENGTH; i++) {
+                n_x_Q9_temp[i] = (x[n+i] * normFactorinv_Q17 + 128)>>8;
             }
 
-            int32_t y = 16384;
-            int m = curidx;
-            for (int i = 0; i < filt_iter; i++) {
-                y += (weightsQ15[i] * x[m]);
-                m--;
+            for (int i = 0; i < FILTER_LENGTH; i++) {
+                offsetQ18[i] = (n_x_Q9_temp[i] * n_e_mu_Q24_temp+16384)>>15;
+            }       
+            
+            if (inst->adapted){
+                for (int i = 0; i < FILTER_LENGTH; i++) {
+                    offsetQ18[i] = (offsetQ18[i] *  inst->prodQ15[i]+16384)>>15;
+                }               
             }
 
-            y = y>>15;
-
-            // 잔차 신호 계산
-            float e = (float)micSignal[n] -  (float)y;
-            errorSignal[n] = (int16_t)e;
-
-            if (updateon==1) {
-                float e_mu_temp = mu * e;
-
-                // 필터 가중치 업데이트 (플로팅 연산)
-                m = curidx;
-                for (int i = 0; i < filt_iter; i++) {
-                    // weights[i] = weights[i] * leaky[i] + mu * e * (float)x[m];
-                    weights[i] = weights[i] + e_mu_temp * (float)x[m];
-
-                    // if (inst->adapted){
-                    //     weights[i] = weights[i] + (e_mu_temp * ((float)x[m])) * inst->prod[i];
-                    // } else {
-                    //     weights[i] = weights[i] + e_mu_temp * ((float)x[m]);
-                    // }
-
-                    m--;
-                }
-            } else {
-                // for (int i = 0; i < FILTER_LENGTH; i++) {
-                //     weights[i] = weights[i] * leaky[i];
-                // }            
+            for (int i = 0; i < FILTER_LENGTH; i++) {
+                weightsQ18[i] = weightsQ18[i] + (offsetQ18[i]);
             }
         }
     }
@@ -2471,59 +2477,43 @@ void nlms_echo_canceller(aecInst_t *aecInst, int16_t *refSignal, int16_t *micSig
     // 필터 계수 발산 방지
     int resetWeights = 0; // 초기값: 0 (거짓)
     for (int i = 0; i < FILTER_LENGTH; i++) {
-        if (fabs(weights[i]) > WEIGHT_THRESHOLD || isnan(weights[i])) {
+        if (abs(weightsQ18[i]) > WEIGHT_THRESHOLD) {
             resetWeights = 1; // 참
             break;
         }
     }
     if (resetWeights) {
         for (int i = 0; i < FILTER_LENGTH; i++) {
-            weights[i] = 0.0f; // 필터 계수를 0으로 초기화
+            weightsQ18[i] = 0; // 필터 계수를 0으로 초기화
         }
-        printf("Weights reset to prevent divergence on second stage.\n");
+        printf("Weights reset to prevent divergence.\n");
     }
 
     // 감쇄량 계산
     float micPower = calculate_rms_int32(micSignal, length);
-    float errorPower = calculate_rms_int32((int16_t *)errorSignal, length);
+    float errorPower = calculate_rms_int32(errorSignal, length);
     *prevAttenuation = 20.0f * log10f(micPower / (errorPower + 1));
-    // printf("micPower= %.2f, errorPower=%.2f, Attenuation = %.2f updateon=%d\n",20.0f * log10f(micPower)-90.3f, 20.0f * log10f(errorPower)-90.3f, *prevAttenuation, updateon);
 
-//	    if (!inst->adapted && *prevAttenuation > 15.0f)
-//	    {    
-//	        inst->adapted = 1;
-//	
-//	        calc_prod(inst->prod, weights, FILTER_LENGTH);
-//	    }
+    if (!inst->adapted && *prevAttenuation > 30.0f)
+    {    
+        inst->adapted = 1;
 
+        // calc_prod(inst->prod, weights, FILTER_LENGTH);
+        calc_prod_Q18(inst->prodQ15, weightsQ18, FILTER_LENGTH);
+    }
 
-#ifdef DEBUG_AEC
+    #ifdef DEBUG_AEC
 	if ((g_aec_debug_on==1)&&(g_aec_debug_snd_idx==0)&&(inst->chan_num==0)){
-       
         FloatPacket packet;
-        // packet.val1 = (float)((Sff-See)*fabsf(Sff-See));
-        // packet.val2 = (float)(Sff*Dbf);
-        // packet.val3 = (float)((inst->Davg1)*fabsf(inst->Davg1));
-        // packet.val4 = (float)(0.5*inst->Dvar1);
-        // packet.val5 = (float)((inst->Davg2)*fabsf(inst->Davg2));
-        // packet.val6 = (float)(0.25*inst->Dvar2);
-
-        packet.val1 = (float)calculate_rms_int32((int16_t *)refSignal, length);
-        packet.val2 = (float)micPower;
-        packet.val3 = (float)micPower;
-        packet.val4 = (float)errorPower;
-        packet.val5 = (float)inst->sum_adapt;
-        packet.val6 = (float)inst->adapt_rate;        
+        packet.val1 = (float)*prevAttenuation;
+        packet.val2 = (float)normFactorinv_Q17;
+        packet.val3 = (float)refPowerdB;
+        packet.val4 = (float)updateon;
+        packet.val5 = (float)mu_tapQ18;
+        packet.val6 = (float)offsetQ18[0];    
 
         debug_matlab_ssl_float_packet_send(8, packet);
         debug_matlab_int_array_send(9, &weightsQ15[0], FILTER_LENGTH);
-        // debug_matlab_int_array_send(9, &w_real_Q33[0], FILTER_LENGTH);
-
-        debug_matlab_ssl_float_send(10, (*prevAttenuation));
-        // debug_matlab_ssl_float_send(10, e_mu_temp*8.5899e+09);
-        // debug_matlab_ssl_float_send(10, (float)n_e_mu_Q23);
-
-        // debug_matlab_ssl_float_send(10, (Dbf));
     }
 
 	if ((g_aec_debug_on==1)&&(inst->chan_num==0)){
@@ -2549,179 +2539,179 @@ void nlms_echo_canceller(aecInst_t *aecInst, int16_t *refSignal, int16_t *micSig
 #endif
 
 
-void AEC_2ch_Proc(aecInst_t *aecInst, int16_t *inBufRef, int16_t *inBufMic, int16_t *outBuf, int framelen, int delay, int delay_auto, float MicscaledB) {
-    aecInst_t *inst = (aecInst_t *)aecInst;
-    float refPower, refRMS;
-    float micPower, micRMS;
+// void AEC_2ch_Proc(aecInst_t *aecInst, int16_t *inBufRef, int16_t *inBufMic, int16_t *outBuf, int framelen, int delay, int delay_auto, float MicscaledB) {
+//     aecInst_t *inst = (aecInst_t *)aecInst;
+//     float refPower, refRMS;
+//     float micPower, micRMS;
 
-    int16_t errorSignal[FRAME_SIZE];
-    float noiseBuffer[FRAME_SIZE];
+//     int16_t errorSignal[FRAME_SIZE];
+//     float noiseBuffer[FRAME_SIZE];
 
 
-    int updateon=1;
+//     int updateon=1;
 
-    float micscale = powf(10.0f, MicscaledB/20.0);
+//     float micscale = powf(10.0f, MicscaledB/20.0);
 
-    int32_t pre_emph_q15 = (int32_t)(0.7f * 32768.0f);
+//     int32_t pre_emph_q15 = (int32_t)(0.7f * 32768.0f);
 
     
-    float noisedB = -40.0f; // 노이즈 강도 조정    
+//     float noisedB = -40.0f; // 노이즈 강도 조정    
 
-    if (inBufRef != NULL) {
+//     if (inBufRef != NULL) {
 
-        if ((delay_auto == 1)&&(inst->delayinit==0)) {
-            // 버퍼에 현재 프레임을 추가 (순환 버퍼처럼 사용)
-            memmove(&inst->ref_Dly_Buffer[0], &inst->ref_Dly_Buffer[framelen], (DELAY_BUFFER_SIZE - framelen) * sizeof(int16_t));
-            memmove(&inst->mic_Dly_Buffer[0], &inst->mic_Dly_Buffer[framelen], (DELAY_BUFFER_SIZE - framelen) * sizeof(int16_t));
-            memcpy(&inst->ref_Dly_Buffer[DELAY_BUFFER_SIZE - framelen], inBufRef, framelen * sizeof(int16_t));
-            memcpy(&inst->mic_Dly_Buffer[DELAY_BUFFER_SIZE - framelen], inBufMic, framelen * sizeof(int16_t));
+//         if ((delay_auto == 1)&&(inst->delayinit==0)) {
+//             // 버퍼에 현재 프레임을 추가 (순환 버퍼처럼 사용)
+//             memmove(&inst->ref_Dly_Buffer[0], &inst->ref_Dly_Buffer[framelen], (DELAY_BUFFER_SIZE - framelen) * sizeof(int16_t));
+//             memmove(&inst->mic_Dly_Buffer[0], &inst->mic_Dly_Buffer[framelen], (DELAY_BUFFER_SIZE - framelen) * sizeof(int16_t));
+//             memcpy(&inst->ref_Dly_Buffer[DELAY_BUFFER_SIZE - framelen], inBufRef, framelen * sizeof(int16_t));
+//             memcpy(&inst->mic_Dly_Buffer[DELAY_BUFFER_SIZE - framelen], inBufMic, framelen * sizeof(int16_t));
 
-            refRMS = calculate_rms_int32(inBufRef, framelen);
-            refPower = 20.0f * log10f(refRMS + 1e-10f) - 90.3090f; // dBFS로 변환
+//             refRMS = calculate_rms_int32(inBufRef, framelen);
+//             refPower = 20.0f * log10f(refRMS + 1e-10f) - 90.3090f; // dBFS로 변환
 
-            if (refPower > MIN_POWER) {
-                inst->corr_hold = 2;
-            }
+//             if (refPower > MIN_POWER) {
+//                 inst->corr_hold = 2;
+//             }
 
-            inst->corr_hold--;
-            if (inst->corr_hold <= 0) inst->corr_hold = 0;
+//             inst->corr_hold--;
+//             if (inst->corr_hold <= 0) inst->corr_hold = 0;
 
-            if (inst->corr_hold > 0) {
-                calculate_global_delay(inst->ref_Dly_Buffer, inst->mic_Dly_Buffer, framelen, inst->crossCorr, &inst->frameCount, &inst->estimatedDelay, &inst->delayinit, &inst->delayupdated);
-            }
+//             if (inst->corr_hold > 0) {
+//                 calculate_global_delay(inst->ref_Dly_Buffer, inst->mic_Dly_Buffer, framelen, inst->crossCorr, &inst->frameCount, &inst->estimatedDelay, &inst->delayinit, &inst->delayupdated);
+//             }
 
-            if (inst->delayupdated == 1) {
-                AEC_delay_init(inst, &inst->d_buf_g[0][0], Ref_delay);
-                inst->delayupdated = 0;
-                inst->adapted = 0;
-                inst->sum_adapt = 0;
-            }
-        }
+//             if (inst->delayupdated == 1) {
+//                 AEC_delay_init(inst, &inst->d_buf_g[0][0], Ref_delay);
+//                 inst->delayupdated = 0;
+//                 inst->adapted = 0;
+//                 inst->sum_adapt = 0;
+//             }
+//         }
 
-        if (inst->delayinit == 0) {
-            inst->estimatedDelay = delay;
-        }
+//         if (inst->delayinit == 0) {
+//             inst->estimatedDelay = delay;
+//         }
 
-        pre_emphasis(&inBufRef[0], pre_emph_q15, &inst->mem_r, framelen);
-        pre_emphasis(&inBufMic[0], pre_emph_q15, &inst->mem_d, framelen);
-        pre_emphasis(&inBufMic[0+framelen], pre_emph_q15, &inst->mem_d2, framelen);
+//         pre_emphasis(&inBufRef[0], pre_emph_q15, &inst->mem_r, framelen);
+//         pre_emphasis(&inBufMic[0], pre_emph_q15, &inst->mem_d, framelen);
+//         pre_emphasis(&inBufMic[0+framelen], pre_emph_q15, &inst->mem_d2, framelen);
 
-        // 글로벌 딜레이 적용
-        AEC_delay_with_framelen(inst, &inBufRef[0], &inBufRef[0], &inst->d_buf_g[0][0], inst->estimatedDelay, framelen);        
+//         // 글로벌 딜레이 적용
+//         AEC_delay_with_framelen(inst, &inBufRef[0], &inBufRef[0], &inst->d_buf_g[0][0], inst->estimatedDelay, framelen);        
 
-        // 참조 신호의 RMS 크기 계산
-        refRMS = calculate_rms_int32(inBufRef, framelen);
-        refPower = 20.0f * log10f(refRMS + 1e-10f) - 90.3090f; // dBFS로 변환
-        // micRMS = calculate_rms_int32(inBufMic, framelen);
-        // micPower = 20.0f * log10f(micRMS + 1e-10f) - 90.3090f; // dBFS로 변환
-        // printf("refPower = %.2fdB, micPower=%.2f \r\n",refPower, micPower);     
+//         // 참조 신호의 RMS 크기 계산
+//         refRMS = calculate_rms_int32(inBufRef, framelen);
+//         refPower = 20.0f * log10f(refRMS + 1e-10f) - 90.3090f; // dBFS로 변환
+//         // micRMS = calculate_rms_int32(inBufMic, framelen);
+//         // micPower = 20.0f * log10f(micRMS + 1e-10f) - 90.3090f; // dBFS로 변환
+//         // printf("refPower = %.2fdB, micPower=%.2f \r\n",refPower, micPower);     
 
-        // 참조 신호와 마이크 신호를 부드럽게 노멀라이즈
-        if (refPower > MIN_POWER) {
-            smooth_normalize_signal_rms_int32(inBufRef, refRMS, framelen, &inst->refScale, -25.0);
+//         // 참조 신호와 마이크 신호를 부드럽게 노멀라이즈
+//         if (refPower > MIN_POWER) {
+//             smooth_normalize_signal_rms_int32(inBufRef, refRMS, framelen, &inst->refScale, -25.0);
 
-            // micScaleQ15 = (int32_t)(micScale * refScale * 32768.0f);
-            int32_t micScaleQ15 = (int32_t)(micscale * inst->refScale * 32768.0f);
+//             // micScaleQ15 = (int32_t)(micScale * refScale * 32768.0f);
+//             int32_t micScaleQ15 = (int32_t)(micscale * inst->refScale * 32768.0f);
 
-            for (int j = 0; j < 2 ; j++){
-                for (int i = 0; i < framelen; i++) {
-                    inBufMic[i+j*framelen] = (int16_t)(((int32_t)(inBufMic[i+j*framelen]) * micScaleQ15) >> 15);
-                }
-            }
+//             for (int j = 0; j < 2 ; j++){
+//                 for (int i = 0; i < framelen; i++) {
+//                     inBufMic[i+j*framelen] = (int16_t)(((int32_t)(inBufMic[i+j*framelen]) * micScaleQ15) >> 15);
+//                 }
+//             }
 
-            updateon = 1;
+//             updateon = 1;
 
-        } else {
-                int32_t refScaleQ15 = (int32_t)(inst->refScale * 32768.0f);
-                // micScaleQ15 = (int32_t)(micScale * inst->refScale * 32768.0f);
-                int32_t micScaleQ15 = (int32_t)(micscale * inst->refScale * 32768.0f);
+//         } else {
+//                 int32_t refScaleQ15 = (int32_t)(inst->refScale * 32768.0f);
+//                 // micScaleQ15 = (int32_t)(micScale * inst->refScale * 32768.0f);
+//                 int32_t micScaleQ15 = (int32_t)(micscale * inst->refScale * 32768.0f);
 
-            for (int i = 0; i < framelen; i++) {
-                inBufRef[i] = (int16_t)(((int32_t)(inBufRef[i]) * refScaleQ15) >> 15);
-            }
+//             for (int i = 0; i < framelen; i++) {
+//                 inBufRef[i] = (int16_t)(((int32_t)(inBufRef[i]) * refScaleQ15) >> 15);
+//             }
 
-            for (int j = 0; j < 2 ; j++){
-                for (int i = 0; i < framelen; i++) {
-                    inBufMic[i+j*framelen] = (int16_t)(((int32_t)(inBufMic[i+j*framelen]) * micScaleQ15) >> 15);
-                }                
-            }
+//             for (int j = 0; j < 2 ; j++){
+//                 for (int i = 0; i < framelen; i++) {
+//                     inBufMic[i+j*framelen] = (int16_t)(((int32_t)(inBufMic[i+j*framelen]) * micScaleQ15) >> 15);
+//                 }                
+//             }
 
-            updateon = 0;
-        }
-        // printf("refScale = %f, micScale=%f \r\n",refScale, micScale);
-    }
+//             updateon = 0;
+//         }
+//         // printf("refScale = %f, micScale=%f \r\n",refScale, micScale);
+//     }
 
-    if (inBufRef != NULL) {
+//     if (inBufRef != NULL) {
 
-        // printf("refPower= %.2f, ",refPower);
-        // NLMS 에코 캔슬러 실행
-        // 
-        nlms_echo_canceller_2ch_two_path(inst, inBufRef, inBufMic, inst->weightsback,  inst->weightsfore, inst->leaky, errorSignal, inst->uBuf, refPower, &inst->prevAttenuation, framelen, updateon);
+//         // printf("refPower= %.2f, ",refPower);
+//         // NLMS 에코 캔슬러 실행
+//         // 
+//         nlms_echo_canceller_2ch_two_path(inst, inBufRef, inBufMic, inst->weightsback,  inst->weightsfore, inst->leaky, errorSignal, inst->uBuf, refPower, &inst->prevAttenuation, framelen, updateon);
 
-        // nlms_echo_canceller(inBufRef, errorSignal, weights_second, leaky, errorSignal_second, x2, refPower, &prevAttenuation_second, framelen, updateon);
+//         // nlms_echo_canceller(inBufRef, errorSignal, weights_second, leaky, errorSignal_second, x2, refPower, &prevAttenuation_second, framelen, updateon);
 
 
-        float errRMS = calculate_rms_int32(errorSignal, framelen);
-        float errPower = 20.0f * log10f(errRMS + 1e-10f) - 90.3090f; // dBFS로 변환
+//         float errRMS = calculate_rms_int32(errorSignal, framelen);
+//         float errPower = 20.0f * log10f(errRMS + 1e-10f) - 90.3090f; // dBFS로 변환
 
-        micRMS = calculate_rms_int32(inBufMic, framelen*2);
-        micPower = 20.0f * log10f(micRMS + 1e-10f) - 90.3090f; // dBFS로 변환
+//         micRMS = calculate_rms_int32(inBufMic, framelen*2);
+//         micPower = 20.0f * log10f(micRMS + 1e-10f) - 90.3090f; // dBFS로 변환
 
-        float gate_dB = 0.0f;
-        if (refPower > MIN_POWER && (errPower < (micPower-15.0f)|| (inst->adapted == 0))) {
-            gate_dB = -10.0f;
-            // printf("ref only ");
-        }
+//         float gate_dB = 0.0f;
+//         if (refPower > MIN_POWER && (errPower < (micPower-15.0f)|| (inst->adapted == 0))) {
+//             gate_dB = -10.0f;
+//             // printf("ref only ");
+//         }
 
-        // printf("micPower: %.2f errPower: %.2f prevAttenuation = %.2f\n", micPower, errPower, prevAttenuation);
+//         // printf("micPower: %.2f errPower: %.2f prevAttenuation = %.2f\n", micPower, errPower, prevAttenuation);
 
-        int32_t inverseMicScale = (int32_t)(32768.0f / (inst->refScale));
-        for (int i = 0; i < framelen; i++) {
-            // inBufRef[i] = inBufMic[i];
-            inBufRef[i] = (int16_t)((inverseMicScale * (int32_t)inBufMic[i])>>15); // 잔차 신호를 역으로 스케일링
-        }
+//         int32_t inverseMicScale = (int32_t)(32768.0f / (inst->refScale));
+//         for (int i = 0; i < framelen; i++) {
+//             // inBufRef[i] = inBufMic[i];
+//             inBufRef[i] = (int16_t)((inverseMicScale * (int32_t)inBufMic[i])>>15); // 잔차 신호를 역으로 스케일링
+//         }
 
-        // 역 스케일링: 잔차 신호를 원래 크기로 보정
-        inverseMicScale = (int32_t)(32768.0f / (micscale * inst->refScale));
+//         // 역 스케일링: 잔차 신호를 원래 크기로 보정
+//         inverseMicScale = (int32_t)(32768.0f / (micscale * inst->refScale));
         
-        float gate_level = powf(10.0f, (gate_dB/20.0f));
-        inst->gate_aec = inst->gate_aec * 0.5 + gate_level * 0.5;
-        inverseMicScale = (int32_t)((32768.0f / (micscale * inst->refScale)) * inst->gate_aec);
-        // inverseMicScale = (int32_t)((32768.0f / (micscale * refScale)));
+//         float gate_level = powf(10.0f, (gate_dB/20.0f));
+//         inst->gate_aec = inst->gate_aec * 0.5 + gate_level * 0.5;
+//         inverseMicScale = (int32_t)((32768.0f / (micscale * inst->refScale)) * inst->gate_aec);
+//         // inverseMicScale = (int32_t)((32768.0f / (micscale * refScale)));
 
-        for (int j = 0; j < 2 ; j++){
-            for (int n = 0; n < framelen; n++) {
-                errorSignal[n+j*framelen] = (int16_t)((inverseMicScale * (int32_t)errorSignal[n+j*framelen])>>15); // 잔차 신호를 역으로 스케일링
-            }
-        }
+//         for (int j = 0; j < 2 ; j++){
+//             for (int n = 0; n < framelen; n++) {
+//                 errorSignal[n+j*framelen] = (int16_t)((inverseMicScale * (int32_t)errorSignal[n+j*framelen])>>15); // 잔차 신호를 역으로 스케일링
+//             }
+//         }
 
-        // 핑크 노이즈 생성
-        generate_pink_noise(noiseBuffer, framelen, 0.1);
+//         // 핑크 노이즈 생성
+//         generate_pink_noise(noiseBuffer, framelen, 0.1);
 
-        // 컴포트 노이즈 추가
-        add_comfort_noise(&errorSignal[0], noiseBuffer, framelen, noisedB);        
-        add_comfort_noise(&errorSignal[framelen], noiseBuffer, framelen, noisedB);       
+//         // 컴포트 노이즈 추가
+//         add_comfort_noise(&errorSignal[0], noiseBuffer, framelen, noisedB);        
+//         add_comfort_noise(&errorSignal[framelen], noiseBuffer, framelen, noisedB);       
 
-        for (int i = 0; i < framelen * 2; i++) {
-            inBufMic[i] = errorSignal[i];
-        }
-    }
+//         for (int i = 0; i < framelen * 2; i++) {
+//             inBufMic[i] = errorSignal[i];
+//         }
+//     }
 
-    de_emphasis(&inBufRef[0], pre_emph_q15, &inst->mem_r_d, framelen);
-    de_emphasis(&inBufMic[0], pre_emph_q15, &inst->mem_d_d, framelen);
-    de_emphasis(&inBufMic[framelen], pre_emph_q15, &inst->mem_d_d2, framelen);
+//     de_emphasis(&inBufRef[0], pre_emph_q15, &inst->mem_r_d, framelen);
+//     de_emphasis(&inBufMic[0], pre_emph_q15, &inst->mem_d_d, framelen);
+//     de_emphasis(&inBufMic[framelen], pre_emph_q15, &inst->mem_d_d2, framelen);
     
-}
+// }
 
 
 void AEC_single_Proc(aecInst_t *aecInst, int16_t *inBufRef, int16_t *inBufMic, int16_t *outBuf, int framelen, int delay, float MicscaledB) {
     aecInst_t *inst = (aecInst_t *)aecInst;
-    float refPower, refRMS;
+    float refPowerdB, refRMS;
     float micPower, micRMS;
 
     int16_t refSignal[FRAME_SIZE];
     int16_t errorSignal[FRAME_SIZE];
-    // int16_t errorSignal_second[FRAME_SIZE];
+
     float noiseBuffer[FRAME_SIZE];
 
 #ifdef ENABLE_PROFILING
@@ -2740,58 +2730,48 @@ void AEC_single_Proc(aecInst_t *aecInst, int16_t *inBufRef, int16_t *inBufMic, i
 
         memcpy(&refSignal[0], &inBufRef[0], sizeof(int16_t)*framelen);
 
-        // pre_emphasis(&inBufRef[0], pre_emph_q15, &inst->mem_r, framelen);
-        // pre_emphasis(&refSignal[0], pre_emph_q15, &inst->mem_r, framelen);
-        // pre_emphasis(&inBufMic[0], pre_emph_q15, &inst->mem_d, framelen);
+        pre_emphasis(&refSignal[0], pre_emph_q15, &inst->mem_r, framelen);
+        pre_emphasis(&inBufMic[0], pre_emph_q15, &inst->mem_d, framelen);
 
-#ifdef ENABLE_PROFILING
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[1] += stepTime;
+// #ifdef ENABLE_PROFILING
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[1] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING
-        start = clock();
-#endif
+// #ifdef ENABLE_PROFILING
+//         start = clock();
+// #endif
 
         // 글로벌 딜레이 적용
-        // AEC_delay_with_framelen(inst, &inBufRef[0], &inBufRef[0], &inst->d_buf_g[0][0], delay, framelen);        
-
-        if (delay >= 0){
-            // AEC_delay_with_framelen(inst, &inBufRef[0], &inBufRef[0], &inst->d_buf_g[0][0], delay, framelen);        
+        if (delay > 0){    
             AEC_delay_with_framelen(inst, &refSignal[0], &refSignal[0], &inst->d_buf_g[0][0], delay, framelen);     
-        } else {
+        } else if (delay < 0) {
             AEC_delay_with_framelen(inst, &inBufMic[0], &inBufMic[0], &inst->d_buf_g[0][0], -1*delay, framelen);        
         }
 
-#ifdef ENABLE_PROFILING
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[2] += stepTime;
+// #ifdef ENABLE_PROFILING
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[2] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING
-        start = clock();
-#endif
+// #ifdef ENABLE_PROFILING
+//         start = clock();
+// #endif
 
         // 참조 신호의 RMS 크기 계산
-        // refRMS = calculate_rms_int32(inBufRef, framelen);
         refRMS = calculate_rms_int32(refSignal, framelen);
-        refPower = 20.0f * log10f(refRMS + 1e-10f) - 90.3090f; // dBFS로 변환
-        // micRMS = calculate_rms_int32(inBufMic, framelen);
-        // micPower = 20.0f * log10f(micRMS + 1e-10f) - 90.3090f; // dBFS로 변환
-        // printf("refPower = %.2fdB, micPower=%.2f \r\n",refPower, micPower);     
+        refPowerdB = 20.0f * log10f(refRMS + 1e-10f) - 90.3090f; // dBFS로 변환
 
         // 참조 신호와 마이크 신호를 부드럽게 노멀라이즈
-        if (refPower > MIN_POWER) {
-            // smooth_normalize_signal_rms_int32(inBufRef, refRMS, framelen, &inst->refScale, -25.0);
+        if (refPowerdB > MIN_POWER) {
             smooth_normalize_signal_rms_int32(refSignal, refRMS, framelen, &inst->refScale, -25.0);
 
-            // micScaleQ15 = (int32_t)(micScale * inst->refScale * 32768.0f);
             int32_t micScaleQ15 = (int32_t)(micscale * inst->refScale * 32768.0f);
 
             for (int i = 0; i < framelen; i++) {
@@ -2802,11 +2782,9 @@ void AEC_single_Proc(aecInst_t *aecInst, int16_t *inBufRef, int16_t *inBufMic, i
 
         } else {
             int32_t refScaleQ15 = (int32_t)(inst->refScale * 32768.0f);
-            // micScaleQ15 = (int32_t)(micScale * inst->refScale * 32768.0f);
             int32_t micScaleQ15 = (int32_t)(micscale * inst->refScale * 32768.0f);
 
             for (int i = 0; i < framelen; i++) {
-                // inBufRef[i] = (int16_t)(((int32_t)(inBufRef[i]) * refScaleQ15) >> 15);
                 refSignal[i] = (int16_t)(((int32_t)(refSignal[i]) * refScaleQ15) >> 15);
                 inBufMic[i] = (int16_t)(((int32_t)(inBufMic[i]) * micScaleQ15) >> 15);
             }
@@ -2814,97 +2792,58 @@ void AEC_single_Proc(aecInst_t *aecInst, int16_t *inBufRef, int16_t *inBufMic, i
             updateon = 0;
         }
 
-#ifdef ENABLE_PROFILING
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[3] += stepTime;
+// #ifdef ENABLE_PROFILING
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[3] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING
-        start = clock();
-#endif
+// #ifdef ENABLE_PROFILING
+//         start = clock();
+// #endif
 
-        // printf("inst->refScale = %f, micScale=%f \r\n",inst->refScale, micScale);
-
-        // printf("refPower= %.2f, ",refPower);
         // NLMS 에코 캔슬러 실행
-        // nlms_echo_canceller_two_path(inst, inBufRef, inBufMic, inst->weightsback,  inst->weightsfore, inst->leaky, errorSignal, inst->uBuf, refPower, &inst->prevAttenuation, framelen, updateon);
-        // nlms_echo_canceller_two_path       (inst, refSignal, inBufMic, inst->weightsback,  inst->weightsfore, inst->leaky, errorSignal, inst->uBuf, refPower, &inst->prevAttenuation, framelen, updateon);
-        nlms_echo_canceller(inst, refSignal, inBufMic, inst->weightsback, inst->leaky, errorSignal, inst->uBuf, refPower, &inst->prevAttenuation, framelen, updateon);
-        // nlms_echo_canceller_two_path_strong(inst, refSignal, inBufMic, inst->weightsback,  inst->weightsfore, inst->leaky, errorSignal, inst->uBuf, refPower, &inst->prevAttenuation, framelen, updateon);
-        // for (int i = 0; i < framelen; i++) {
-        //     errorSignal[i] = inBufMic[i];
-        // }
+        // nlms_echo_canceller_two_path(inst, inBufRef, inBufMic, inst->weightsback,  inst->weightsfore, inst->leaky, errorSignal, inst->uBuf, refPowerdB, &inst->prevAttenuation, framelen, updateon);
+        // nlms_echo_canceller_two_path       (inst, refSignal, inBufMic, inst->weightsback,  inst->weightsfore, inst->leaky, errorSignal, inst->uBuf, refPowerdB, &inst->prevAttenuation, framelen, updateon);
+        nlms_echo_canceller(inst, refSignal, inBufMic, inst->weightsQ18, errorSignal, inst->uBuf, refPowerdB, &inst->prevAttenuation, framelen, updateon);
+        // nlms_echo_canceller_two_path_strong(inst, refSignal, inBufMic, inst->weightsback,  inst->weightsfore, inst->leaky, errorSignal, inst->uBuf, refPowerdB, &inst->prevAttenuation, framelen, updateon);
 
+// #ifdef ENABLE_PROFILING
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[4] += stepTime;
 
-#ifdef ENABLE_PROFILING
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[4] += stepTime;
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+// #ifdef ENABLE_PROFILING
+//         start = clock();
+// #endif
 
-#ifdef ENABLE_PROFILING
-        start = clock();
-#endif
-        // nlms_echo_canceller(inBufRef, errorSignal, weights_second, leaky, errorSignal_second, uBuf2, refPower, &prevAttenuation_second, framelen, updateon);
-
-        float errRMS = calculate_rms_int32(errorSignal, framelen);
-        float errPower = 20.0f * log10f(errRMS + 1e-10f) - 90.3090f; // dBFS로 변환
-
-        micRMS = calculate_rms_int32(inBufMic, framelen);
-        micPower = 20.0f * log10f(micRMS + 1e-10f) - 90.3090f; // dBFS로 변환
-
-        // printf("micPower: %.2f errPower: %.2f prevAttenuation = %.2f\n", micPower, errPower, prevAttenuation);
-
-        // int32_t inverseMicScale = (int32_t)(32768.0f / (inst->refScale));
-        // for (int i = 0; i < framelen; i++) {
-        //     // inBufRef[i] = inBufMic[i];
-        //     // inBufRef[i] = (int16_t)((inverseMicScale * (int32_t)inBufMic[i])>>15); // 잔차 신호를 역으로 스케일링
-        //     refSignal[i] = (int16_t)((inverseMicScale * (int32_t)inBufMic[i])>>15); // 잔차 신호를 역으로 스케일링
-        // }
-       
-        float gate_dB = 0.0f;
-        if (refPower > MIN_POWER && (errPower < (micPower-15.0f)|| (inst->adapted == 0))) {
-            gate_dB = -10.0f;
-        }
-        float gate_level = powf(10.0f, (gate_dB/20.0f));
-        inst->gate_aec = inst->gate_aec * 0.5 + gate_level * 0.5;
-        
-        int32_t inverseMicScale = (int32_t)((32768.0f / (micscale * inst->refScale)) * inst->gate_aec);
-        // inverseMicScale = (int32_t)((32768.0f / (micscale * inst->refScale)));
+        int32_t inverseMicScale = (int32_t)((32768.0f / (micscale * inst->refScale)));
 
         for (int n = 0; n < framelen; n++) {
             errorSignal[n] = (int16_t)((inverseMicScale * (int32_t)errorSignal[n])>>15); // 잔차 신호를 역으로 스케일링
         }
 
-#ifdef ENABLE_PROFILING
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[5] += stepTime;
+// #ifdef ENABLE_PROFILING
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[5] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
-#ifdef ENABLE_PROFILING
-        start = clock();
-#endif
-        // float noisedB = -30.0f; // 노이즈 강도 조정   
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
+// #ifdef ENABLE_PROFILING
+//         start = clock();
+// #endif
 
-        // // 핑크 노이즈 생성
-        // generate_pink_noise(noiseBuffer, framelen, 0.1);
-
-        // // 컴포트 노이즈 추가
-        // add_comfort_noise(errorSignal, noiseBuffer, framelen, noisedB);    
 
         for (int i = 0; i < framelen; i++) {
             inBufMic[i] = errorSignal[i];
         }
-
-        // de_emphasis(&inBufRef[0], pre_emph_q15, &inst->mem_r_d, framelen);
-        // de_emphasis(&inBufMic[0], pre_emph_q15, &inst->mem_d_d, framelen);
+        de_emphasis(&inBufMic[0], pre_emph_q15, &inst->mem_d_d, framelen);
     }
 
 
@@ -2945,7 +2884,7 @@ void AEC_single_Proc(aecInst_t *aecInst, int16_t *inBufRef, int16_t *inBufMic, i
 
 }
 
-void calc_prod(float * prod, float * weight, int32_t filt_len){
+int calc_prod(float * prod, float * weight, int32_t filt_len){
     float max_sum = 0;
     float prod_sum = 0;
 
@@ -2965,281 +2904,311 @@ void calc_prod(float * prod, float * weight, int32_t filt_len){
     for (int i=0; i<filt_len; i++){
         prod[i] = inv * prod[i];
     }
+
+	return 0;
 }
 
-int AEC_single_Proc_filter_save(aecInst_t *aecInst, int16_t *inBufRef, int16_t *inBufMic, int16_t *outBuf, int framelen, int delay, int delay_auto, float MicscaledB, float** filter, int* filter_len, int* globaldelay) {
-    aecInst_t *inst = (aecInst_t *)aecInst;
-    float refPower, refRMS;
-    float micPower, micRMS;
+int calc_prod_Q18(int32_t * prodQ15, int32_t * weightQ18, int32_t filt_len){
+    float max_sum = 0;
+    float prod_sum = 0;
+    float prod[filt_len];
 
-    int16_t refSignal[FRAME_SIZE];
-    int16_t errorSignal[FRAME_SIZE];
-    // int16_t errorSignal_second[FRAME_SIZE];
-    float noiseBuffer[FRAME_SIZE];
+    for (int i=0; i<filt_len; i++){
+        float weight = (double)(weightQ18[i]) * 3.814697265625000e-06;
+        prod[i] = sqrtf(weight * weight);
+        if (prod[i]>max_sum)
+        max_sum = prod[i];
+    }
 
-    int updateon=1;
-    float micscale = powf(10.0f, MicscaledB/20.0);
-    int32_t pre_emph_q15 = (int32_t)(0.7f * 32768.0f);
+    for (int i=0; i<filt_len; i++){
+        prod[i] += max_sum * 0.3;
+        prod_sum += prod[i];
+    }
 
-#ifdef ENABLE_PROFILING
-        total_start = clock();
-#endif
+    float inv = 0.199/prod_sum * filt_len;
 
-    if (inBufRef != NULL) {
+    for (int i=0; i<filt_len; i++){
+        prod[i] = inv * prod[i];
+        prodQ15[i] = (int32_t)(prod[i]*32768.0);
+        // printf("prod[i] = %f, prodQ15[i] = %d \r\n", prod[i], prodQ15[i]);
+    }
 
-#ifdef ENABLE_PROFILING
-        start = clock();
-#endif
+	return 0;
+}
 
-        if ((delay_auto == 1)&&(inst->delayinit==0)) {
-            // 버퍼에 현재 프레임을 추가 (순환 버퍼처럼 사용)
-            memmove(&inst->ref_Dly_Buffer[0], &inst->ref_Dly_Buffer[framelen], (DELAY_BUFFER_SIZE - framelen) * sizeof(int16_t));
-            memmove(&inst->mic_Dly_Buffer[0], &inst->mic_Dly_Buffer[framelen], (DELAY_BUFFER_SIZE - framelen) * sizeof(int16_t));
-            memcpy(&inst->ref_Dly_Buffer[DELAY_BUFFER_SIZE - framelen], inBufRef, framelen * sizeof(int16_t));
-            memcpy(&inst->mic_Dly_Buffer[DELAY_BUFFER_SIZE - framelen], inBufMic, framelen * sizeof(int16_t));
+// int AEC_single_Proc_filter_save(aecInst_t *aecInst, int16_t *inBufRef, int16_t *inBufMic, int16_t *outBuf, int framelen, int delay, int delay_auto, float MicscaledB, float** filter, int* filter_len, int* globaldelay) {
+//     aecInst_t *inst = (aecInst_t *)aecInst;
+//     float refPower, refRMS;
+//     float micPower, micRMS;
 
-            refRMS = calculate_rms_int32(inBufRef, framelen);
-            refPower = 20.0f * log10f(refRMS + 1e-10f) - 90.3090f; // dBFS로 변환
+//     int16_t refSignal[FRAME_SIZE];
+//     int16_t errorSignal[FRAME_SIZE];
+//     // int16_t errorSignal_second[FRAME_SIZE];
+//     float noiseBuffer[FRAME_SIZE];
 
-            if (refPower > MIN_POWER) {
-                inst->corr_hold = 2;
-            }
+//     int updateon=1;
+//     float micscale = powf(10.0f, MicscaledB/20.0);
+//     int32_t pre_emph_q15 = (int32_t)(0.7f * 32768.0f);
 
-            inst->corr_hold--;
-            if (inst->corr_hold <= 0) inst->corr_hold = 0;
+// #ifdef ENABLE_PROFILING
+//         total_start = clock();
+// #endif
 
-            if (inst->corr_hold > 0) {
-                calculate_global_delay(inst->ref_Dly_Buffer, inst->mic_Dly_Buffer, framelen, inst->crossCorr, &inst->frameCount, &inst->estimatedDelay, &inst->delayinit, &inst->delayupdated);
-            }
+//     if (inBufRef != NULL) {
 
-            if (inst->delayupdated == 1) {
-                printf("AEC_single_Proc_filter_save :: delayupdated done. config_p->aecInst_p[i] = %p delay = %d\r\n", inst, inst->estimatedDelay);
-                AEC_delay_init(inst, &inst->d_buf_g[0][0], Ref_delay);
-                inst->delayupdated = 0;
-                inst->adapted = 0;
-                inst->sum_adapt = 0;
-            }
-        }
+// #ifdef ENABLE_PROFILING
+//         start = clock();
+// #endif
 
-        if (inst->delayinit == 0) {
-            inst->estimatedDelay = delay;
-        }
+//         if ((delay_auto == 1)&&(inst->delayinit==0)) {
+//             // 버퍼에 현재 프레임을 추가 (순환 버퍼처럼 사용)
+//             memmove(&inst->ref_Dly_Buffer[0], &inst->ref_Dly_Buffer[framelen], (DELAY_BUFFER_SIZE - framelen) * sizeof(int16_t));
+//             memmove(&inst->mic_Dly_Buffer[0], &inst->mic_Dly_Buffer[framelen], (DELAY_BUFFER_SIZE - framelen) * sizeof(int16_t));
+//             memcpy(&inst->ref_Dly_Buffer[DELAY_BUFFER_SIZE - framelen], inBufRef, framelen * sizeof(int16_t));
+//             memcpy(&inst->mic_Dly_Buffer[DELAY_BUFFER_SIZE - framelen], inBufMic, framelen * sizeof(int16_t));
 
-#ifdef ENABLE_PROFILING
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[0] += stepTime;
+//             refRMS = calculate_rms_int32(inBufRef, framelen);
+//             refPower = 20.0f * log10f(refRMS + 1e-10f) - 90.3090f; // dBFS로 변환
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//             if (refPower > MIN_POWER) {
+//                 inst->corr_hold = 2;
+//             }
 
-#ifdef ENABLE_PROFILING
-        start = clock();
-#endif        
+//             inst->corr_hold--;
+//             if (inst->corr_hold <= 0) inst->corr_hold = 0;
 
-        if ((delay_auto != 1)||(inst->delayinit==1)) {
+//             if (inst->corr_hold > 0) {
+//                 calculate_global_delay(inst->ref_Dly_Buffer, inst->mic_Dly_Buffer, framelen, inst->crossCorr, &inst->frameCount, &inst->estimatedDelay, &inst->delayinit, &inst->delayupdated);
+//             }
 
-            memcpy(&refSignal[0], &inBufRef[0], sizeof(int16_t)*framelen);
+//             if (inst->delayupdated == 1) {
+//                 printf("AEC_single_Proc_filter_save :: delayupdated done. config_p->aecInst_p[i] = %p delay = %d\r\n", inst, inst->estimatedDelay);
+//                 AEC_delay_init(inst, &inst->d_buf_g[0][0], Ref_delay);
+//                 inst->delayupdated = 0;
+//                 inst->adapted = 0;
+//                 inst->sum_adapt = 0;
+//             }
+//         }
 
-            // pre_emphasis(&inBufRef[0], pre_emph_q15, &inst->mem_r, framelen);
-            pre_emphasis(&refSignal[0], pre_emph_q15, &inst->mem_r, framelen);
-            pre_emphasis(&inBufMic[0], pre_emph_q15, &inst->mem_d, framelen);
+//         if (inst->delayinit == 0) {
+//             inst->estimatedDelay = delay;
+//         }
 
-            // 글로벌 딜레이 적용
-            if (inst->estimatedDelay >= 0){
-                // AEC_delay_with_framelen(inst, &inBufRef[0], &inBufRef[0], &inst->d_buf_g[0][0], inst->estimatedDelay, framelen);  
-                AEC_delay_with_framelen(inst, &refSignal[0], &refSignal[0], &inst->d_buf_g[0][0], inst->estimatedDelay, framelen);          
-            } else {
-                AEC_delay_with_framelen(inst, &inBufMic[0], &inBufMic[0], &inst->d_buf_g[0][0], -1*inst->estimatedDelay, framelen);        
-            }
+// #ifdef ENABLE_PROFILING
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[0] += stepTime;
+
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
+
+// #ifdef ENABLE_PROFILING
+//         start = clock();
+// #endif        
+
+//         if ((delay_auto != 1)||(inst->delayinit==1)) {
+
+//             memcpy(&refSignal[0], &inBufRef[0], sizeof(int16_t)*framelen);
+
+//             // pre_emphasis(&inBufRef[0], pre_emph_q15, &inst->mem_r, framelen);
+//             pre_emphasis(&refSignal[0], pre_emph_q15, &inst->mem_r, framelen);
+//             pre_emphasis(&inBufMic[0], pre_emph_q15, &inst->mem_d, framelen);
+
+//             // 글로벌 딜레이 적용
+//             if (inst->estimatedDelay >= 0){
+//                 // AEC_delay_with_framelen(inst, &inBufRef[0], &inBufRef[0], &inst->d_buf_g[0][0], inst->estimatedDelay, framelen);  
+//                 AEC_delay_with_framelen(inst, &refSignal[0], &refSignal[0], &inst->d_buf_g[0][0], inst->estimatedDelay, framelen);          
+//             } else {
+//                 AEC_delay_with_framelen(inst, &inBufMic[0], &inBufMic[0], &inst->d_buf_g[0][0], -1*inst->estimatedDelay, framelen);        
+//             }
             
 
-            // 참조 신호의 RMS 크기 계산
-            // refRMS = calculate_rms_int32(inBufRef, framelen);
-            refRMS = calculate_rms_int32(refSignal, framelen);
-            refPower = 20.0f * log10f(refRMS + 1e-10f) - 90.3090f; // dBFS로 변환
-            // printf("refPower = %.2fdB, micPower=%.2f \r\n",refPower, micPower);     
+//             // 참조 신호의 RMS 크기 계산
+//             // refRMS = calculate_rms_int32(inBufRef, framelen);
+//             refRMS = calculate_rms_int32(refSignal, framelen);
+//             refPower = 20.0f * log10f(refRMS + 1e-10f) - 90.3090f; // dBFS로 변환
+//             // printf("refPower = %.2fdB, micPower=%.2f \r\n",refPower, micPower);     
 
-            // 참조 신호와 마이크 신호를 부드럽게 노멀라이즈
-            if (refPower > MIN_POWER) {
-                // smooth_normalize_signal_rms_int32(inBufRef, refRMS, framelen, &inst->refScale, -25.0);
-                smooth_normalize_signal_rms_int32(refSignal, refRMS, framelen, &inst->refScale, -25.0);
+//             // 참조 신호와 마이크 신호를 부드럽게 노멀라이즈
+//             if (refPower > MIN_POWER) {
+//                 // smooth_normalize_signal_rms_int32(inBufRef, refRMS, framelen, &inst->refScale, -25.0);
+//                 smooth_normalize_signal_rms_int32(refSignal, refRMS, framelen, &inst->refScale, -25.0);
 
-                // micScaleQ15 = (int32_t)(micScale * inst->refScale * 32768.0f);
-                int32_t micScaleQ15 = (int32_t)(micscale * inst->refScale * 32768.0f);
+//                 // micScaleQ15 = (int32_t)(micScale * inst->refScale * 32768.0f);
+//                 int32_t micScaleQ15 = (int32_t)(micscale * inst->refScale * 32768.0f);
 
-                for (int i = 0; i < framelen; i++) {
-                    inBufMic[i] = (int16_t)(((int32_t)(inBufMic[i]) * micScaleQ15) >> 15);
-                }
+//                 for (int i = 0; i < framelen; i++) {
+//                     inBufMic[i] = (int16_t)(((int32_t)(inBufMic[i]) * micScaleQ15) >> 15);
+//                 }
 
-                updateon = 1;
+//                 updateon = 1;
 
-            } else {
-                int32_t refScaleQ15 = (int32_t)(inst->refScale * 32768.0f);
-                // micScaleQ15 = (int32_t)(micScale * inst->refScale * 32768.0f);
-                int32_t micScaleQ15 = (int32_t)(micscale * inst->refScale * 32768.0f);
+//             } else {
+//                 int32_t refScaleQ15 = (int32_t)(inst->refScale * 32768.0f);
+//                 // micScaleQ15 = (int32_t)(micScale * inst->refScale * 32768.0f);
+//                 int32_t micScaleQ15 = (int32_t)(micscale * inst->refScale * 32768.0f);
 
-                for (int i = 0; i < framelen; i++) {
-                    // inBufRef[i] = (int16_t)(((int32_t)(inBufRef[i]) * refScaleQ15) >> 15);
-                    refSignal[i] = (int16_t)(((int32_t)(refSignal[i]) * refScaleQ15) >> 15);
-                    inBufMic[i] = (int16_t)(((int32_t)(inBufMic[i]) * micScaleQ15) >> 15);
-                }
+//                 for (int i = 0; i < framelen; i++) {
+//                     // inBufRef[i] = (int16_t)(((int32_t)(inBufRef[i]) * refScaleQ15) >> 15);
+//                     refSignal[i] = (int16_t)(((int32_t)(refSignal[i]) * refScaleQ15) >> 15);
+//                     inBufMic[i] = (int16_t)(((int32_t)(inBufMic[i]) * micScaleQ15) >> 15);
+//                 }
 
-                updateon = 0;
-            }
-        }
+//                 updateon = 0;
+//             }
+//         }
 
-#ifdef ENABLE_PROFILING
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[1] += stepTime;
+// #ifdef ENABLE_PROFILING
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[1] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING
-        start = clock();
-#endif
+// #ifdef ENABLE_PROFILING
+//         start = clock();
+// #endif
 
-        if ((delay_auto != 1)||(inst->delayinit==1)) {
-            // NLMS 에코 캔슬러 실행
-            // nlms_echo_canceller_two_path_strong(inst, inBufRef, inBufMic, inst->weightsback,  inst->weightsfore, inst->leaky, errorSignal, inst->uBuf, refPower, &inst->prevAttenuation, framelen, updateon);
-            nlms_echo_canceller_two_path_strong(inst, refSignal, inBufMic, inst->weightsback,  inst->weightsfore, inst->leaky, errorSignal, inst->uBuf, refPower, &inst->prevAttenuation, framelen, updateon);
-        }
-#ifdef ENABLE_PROFILING
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[3] += stepTime;
+//         if ((delay_auto != 1)||(inst->delayinit==1)) {
+//             // NLMS 에코 캔슬러 실행
+//             // nlms_echo_canceller_two_path_strong(inst, inBufRef, inBufMic, inst->weightsback,  inst->weightsfore, inst->leaky, errorSignal, inst->uBuf, refPower, &inst->prevAttenuation, framelen, updateon);
+//             nlms_echo_canceller_two_path_strong(inst, refSignal, inBufMic, inst->weightsback,  inst->weightsfore, inst->leaky, errorSignal, inst->uBuf, refPower, &inst->prevAttenuation, framelen, updateon);
+//         }
+// #ifdef ENABLE_PROFILING
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[3] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING
-        start = clock();
-#endif
+// #ifdef ENABLE_PROFILING
+//         start = clock();
+// #endif
 
-        if ((delay_auto != 1)||(inst->delayinit==1)) {
+//         if ((delay_auto != 1)||(inst->delayinit==1)) {
 
-            float errRMS = calculate_rms_int32(errorSignal, framelen);
-            float errPower = 20.0f * log10f(errRMS + 1e-10f) - 90.3090f; // dBFS로 변환
+//             float errRMS = calculate_rms_int32(errorSignal, framelen);
+//             float errPower = 20.0f * log10f(errRMS + 1e-10f) - 90.3090f; // dBFS로 변환
 
-            micRMS = calculate_rms_int32(inBufMic, framelen);
-            micPower = 20.0f * log10f(micRMS + 1e-10f) - 90.3090f; // dBFS로 변환
-            // printf("micPower: %.2f errPower: %.2f prevAttenuation = %.2f\n", micPower, errPower, prevAttenuation);
+//             micRMS = calculate_rms_int32(inBufMic, framelen);
+//             micPower = 20.0f * log10f(micRMS + 1e-10f) - 90.3090f; // dBFS로 변환
+//             // printf("micPower: %.2f errPower: %.2f prevAttenuation = %.2f\n", micPower, errPower, prevAttenuation);
 
-            // int32_t inverseMicScale = (int32_t)(32768.0f / (inst->refScale));
-            // for (int i = 0; i < framelen; i++) {
-            //     // inBufRef[i] = inBufMic[i];
-            //     inBufRef[i] = (int16_t)((inverseMicScale * (int32_t)inBufMic[i])>>15); // 잔차 신호를 역으로 스케일링
-            // }            
+//             // int32_t inverseMicScale = (int32_t)(32768.0f / (inst->refScale));
+//             // for (int i = 0; i < framelen; i++) {
+//             //     // inBufRef[i] = inBufMic[i];
+//             //     inBufRef[i] = (int16_t)((inverseMicScale * (int32_t)inBufMic[i])>>15); // 잔차 신호를 역으로 스케일링
+//             // }            
 
-            // float gate_dB = 0.0f;
-            // if (refPower > MIN_POWER && (errPower < (micPower-15.0f)|| (inst->adapted == 0))) {
-            //     gate_dB = -10.0f;
-            // }
-            // float gate_level = powf(10.0f, (gate_dB/20.0f));
-            // inst->gate_aec = inst->gate_aec * 0.5 + gate_level * 0.5;
+//             // float gate_dB = 0.0f;
+//             // if (refPower > MIN_POWER && (errPower < (micPower-15.0f)|| (inst->adapted == 0))) {
+//             //     gate_dB = -10.0f;
+//             // }
+//             // float gate_level = powf(10.0f, (gate_dB/20.0f));
+//             // inst->gate_aec = inst->gate_aec * 0.5 + gate_level * 0.5;
             
-            // inverseMicScale = (int32_t)((32768.0f / (micscale * inst->refScale)) * inst->gate_aec);
-            int32_t inverseMicScale = (int32_t)((32768.0f / (micscale * inst->refScale)));
+//             // inverseMicScale = (int32_t)((32768.0f / (micscale * inst->refScale)) * inst->gate_aec);
+//             int32_t inverseMicScale = (int32_t)((32768.0f / (micscale * inst->refScale)));
 
-            for (int n = 0; n < framelen; n++) {
-                errorSignal[n] = (int16_t)((inverseMicScale * (int32_t)errorSignal[n])>>15); // 잔차 신호를 역으로 스케일링
-            }
-        }
+//             for (int n = 0; n < framelen; n++) {
+//                 errorSignal[n] = (int16_t)((inverseMicScale * (int32_t)errorSignal[n])>>15); // 잔차 신호를 역으로 스케일링
+//             }
+//         }
 
-#ifdef ENABLE_PROFILING
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[4] += stepTime;
+// #ifdef ENABLE_PROFILING
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[4] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
-#ifdef ENABLE_PROFILING
-        start = clock();
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
+// #ifdef ENABLE_PROFILING
+//         start = clock();
+// #endif
 
-        if ((delay_auto != 1)||(inst->delayinit==1)) {
-            // float noisedB = -30.0f; // 노이즈 강도 조정   
+//         if ((delay_auto != 1)||(inst->delayinit==1)) {
+//             // float noisedB = -30.0f; // 노이즈 강도 조정   
 
-            // // 핑크 노이즈 생성
-            // generate_pink_noise(noiseBuffer, framelen, 0.1);
+//             // // 핑크 노이즈 생성
+//             // generate_pink_noise(noiseBuffer, framelen, 0.1);
 
-            // // 컴포트 노이즈 추가
-            // add_comfort_noise(errorSignal, noiseBuffer, framelen, noisedB);    
+//             // // 컴포트 노이즈 추가
+//             // add_comfort_noise(errorSignal, noiseBuffer, framelen, noisedB);    
 
-            for (int i = 0; i < framelen; i++) {
-                inBufMic[i] = errorSignal[i];
-            }
+//             for (int i = 0; i < framelen; i++) {
+//                 inBufMic[i] = errorSignal[i];
+//             }
 
-            // de_emphasis(&inBufRef[0], pre_emph_q15, &inst->mem_r_d, framelen);
-            de_emphasis(&inBufMic[0], pre_emph_q15, &inst->mem_d_d, framelen);
-        }
+//             // de_emphasis(&inBufRef[0], pre_emph_q15, &inst->mem_r_d, framelen);
+//             de_emphasis(&inBufMic[0], pre_emph_q15, &inst->mem_d_d, framelen);
+//         }
 
-#ifdef ENABLE_PROFILING
-        end = clock();
-        stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
-        totalTime[5] += stepTime;
+// #ifdef ENABLE_PROFILING
+//         end = clock();
+//         stepTime = ((double)(end - start)) / CLOCKS_PER_SEC;
+//         totalTime[5] += stepTime;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-    }
+//     }
 
-#ifdef ENABLE_PROFILING
-        total_end = clock();
-        totalRunTime += ((double)(total_end - total_start)) / CLOCKS_PER_SEC;
+// #ifdef ENABLE_PROFILING
+//         total_end = clock();
+//         totalRunTime += ((double)(total_end - total_start)) / CLOCKS_PER_SEC;
 
-        // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
-#endif
+//         // printf("Time for NLMS echo canceller: %.2f milli seconds\n", stepTime*1000);     
+// #endif
 
-#ifdef ENABLE_PROFILING
-    // 평균 시간 출력
-    count++;
-    if (totalRunTime >= PRINT_INTERVAL) {
-        printf("Average execution time for each step (1-second intervals):\n");
-        for (int i = 0; i < NUM_STEPS; i++) {
-            double averageTime = totalTime[i] / count;
-            double percentage = (totalTime[i] / totalRunTime) * 100.0;
-            printf("Step %d: Average Time = %.2f milli seconds, Percentage = %f%%\n", i + 1, averageTime* 1000, percentage);
-        }
-        // 총 실행 시간 및 각 단계별 누적 시간 초기화
-        totalRunTime = 0.0;
-        for (int i = 0; i < NUM_STEPS; i++) {
-            totalTime[i] = 0.0;
-        }
-        count = 0; // 카운트 초기화
-    }
-#endif
+// #ifdef ENABLE_PROFILING
+//     // 평균 시간 출력
+//     count++;
+//     if (totalRunTime >= PRINT_INTERVAL) {
+//         printf("Average execution time for each step (1-second intervals):\n");
+//         for (int i = 0; i < NUM_STEPS; i++) {
+//             double averageTime = totalTime[i] / count;
+//             double percentage = (totalTime[i] / totalRunTime) * 100.0;
+//             printf("Step %d: Average Time = %.2f milli seconds, Percentage = %f%%\n", i + 1, averageTime* 1000, percentage);
+//         }
+//         // 총 실행 시간 및 각 단계별 누적 시간 초기화
+//         totalRunTime = 0.0;
+//         for (int i = 0; i < NUM_STEPS; i++) {
+//             totalTime[i] = 0.0;
+//         }
+//         count = 0; // 카운트 초기화
+//     }
+// #endif
 
-    if (inst->adapted == 1 && inst->delayinit == 1){
-        *filter = inst->weightsfore;
-        *filter_len = (int)FILTER_LENGTH;
-        *globaldelay = inst->estimatedDelay;
-        inst->adapted = 0;
-        inst->sum_adapt = 0;        
-        return 1;
-    }
+//     if (inst->adapted == 1 && inst->delayinit == 1){
+//         *filter = inst->weightsfore;
+//         *filter_len = (int)FILTER_LENGTH;
+//         *globaldelay = inst->estimatedDelay;
+//         inst->adapted = 0;
+//         inst->sum_adapt = 0;        
+//         return 1;
+//     }
 
-    return 0;
+//     return 0;
     
 
-}
+// }
 
-void AEC_single_filter_load(aecInst_t *aecInst, float* filter, int filter_len, int global_delay){
+// int AEC_single_filter_load(aecInst_t *aecInst, float* filter, int filter_len, int global_delay){
         
-        aecInst_t *inst = (aecInst_t *)aecInst;
+//         aecInst_t *inst = (aecInst_t *)aecInst;
 
-        float *filter_p = filter;
-        for (int i=0; i<filter_len; i++){
-            inst->weightsfore[i] = filter_p[i];
-            inst->weightsback[i] = filter_p[i];
-        }
+//         float *filter_p = filter;
+//         for (int i=0; i<filter_len; i++){
+//             inst->weightsfore[i] = filter_p[i];
+//             inst->weightsback[i] = filter_p[i];
+//         }
 
-        inst->adapted = 1;
-        inst->delayinit == 1;
-        inst->estimatedDelay = global_delay;
-}
+//         inst->adapted = 1;
+//         inst->delayinit == 1;
+//         inst->estimatedDelay = global_delay;
+// }
 
 
 // 크로스 코릴레이션을 사용하여 글로벌 딜레이를 계산하는 함수 (정수 연산)
@@ -3365,45 +3334,68 @@ float dbfs_to_line(float dbfs) {
     return powf(10.0f, dbfs / 20.0f);
 }
 
-// 핑크 노이즈 생성 함수
-void generate_pink_noise(float *noiseBuffer, int length, float noiseLevel) {
-    float b[7] = {0.02109238, 0.07113478, 0.68873558, 0.12020611, 0.12509026, 0.13112453, 0.00051465};
-    float state[6] = {0};
+// // 핑크 노이즈 생성 함수
+// void generate_pink_noise(float *noiseBuffer, int length, float noiseLevel) {
+//     float b[7] = {0.02109238, 0.07113478, 0.68873558, 0.12020611, 0.12509026, 0.13112453, 0.00051465};
+//     float state[6] = {0};
 
-    float scale = Q15_MAXf / (float)RAND_MAX;
+//     float scale = Q15_MAXf / (float)RAND_MAX;
 
-    for (int i = 0; i < length; i++) {
-        float white = ((float)rand() * scale) * 2.0f - Q15_MAXf; // -1.0 ~ 1.0 사이의 화이트 노이즈
-        float pink = white * b[0] + state[0] * b[1] + state[1] * b[2] + state[2] * b[3] +
-                     state[3] * b[4] + state[4] * b[5] + state[5] * b[6];
+//     for (int i = 0; i < length; i++) {
+//         float white = ((float)rand() * scale) * 2.0f - Q15_MAXf; // -1.0 ~ 1.0 사이의 화이트 노이즈
+//         float pink = white * b[0] + state[0] * b[1] + state[1] * b[2] + state[2] * b[3] +
+//                      state[3] * b[4] + state[4] * b[5] + state[5] * b[6];
 
-        // 상태 업데이트
-        for (int j = 5; j > 0; j--) {
-            state[j] = state[j - 1];
-        }
-        state[0] = white;
+//         // 상태 업데이트
+//         for (int j = 5; j > 0; j--) {
+//             state[j] = state[j - 1];
+//         }
+//         state[0] = white;
 
-        // 노이즈 크기 조정
-        noiseBuffer[i] = pink * noiseLevel;
+//         // 노이즈 크기 조정
+//         noiseBuffer[i] = pink * noiseLevel;
 
-        // printf("pink= %f white =%f, noiseBuffer[i] = %f noiseLevel = %f\n", pink, white, noiseBuffer[i], noiseLevel);
-    }
-}
+//         // printf("pink= %f white =%f, noiseBuffer[i] = %f noiseLevel = %f\n", pink, white, noiseBuffer[i], noiseLevel);
+//     }
+// }
 
-// 컴포트 노이즈 추가 함수
-void aec_comfort_noise(int16_t *signal, float *noise, int length, float noiseGainDbfs) {
+// // 컴포트 노이즈 추가 함수
+// void aec_comfort_noise(int16_t *signal, float *noise, int length, float noiseGainDbfs) {
 
-    float noiseGain = dbfs_to_line(noiseGainDbfs);
+//     float noiseGain = dbfs_to_line(noiseGainDbfs);
 
-    for (int i = 0; i < length; i++) {
-        float mixed = (float)signal[i] + noise[i] * noiseGain;
-        if (mixed > 32767.0f) {
-            mixed = 32767.0f; // 클리핑 방지
-        } else if (mixed < -32768.0f) {
-            mixed = -32768.0f; // 클리핑 방지
-        }
-        signal[i] = (int16_t)mixed;
+//     for (int i = 0; i < length; i++) {
+//         float mixed = (float)signal[i] + noise[i] * noiseGain;
+//         if (mixed > 32767.0f) {
+//             mixed = 32767.0f; // 클리핑 방지
+//         } else if (mixed < -32768.0f) {
+//             mixed = -32768.0f; // 클리핑 방지
+//         }
+//         signal[i] = (int16_t)mixed;
 
-        // printf("noise[i] = %f signal[i] = %d, mixed=%f\n", noise[i], signal[i], mixed);
-    }
+//         // printf("noise[i] = %f signal[i] = %d, mixed=%f\n", noise[i], signal[i], mixed);
+//     }
+// }
+
+
+
+/* This inner product is slightly different from the codec version because of fixed-point */
+static inline int32_t inner_prod(const int32_t *x, const int32_t *y, int len)
+{
+    int16_t temp1, temp2, temp3, temp4;
+    int32_t sum=0;
+    len >>= 1;
+    while(len--)
+    {
+        temp1 = *x++;
+        temp2 = *y++;
+        temp3 = *x++;
+        temp4 = *y++;        
+      int32_t part=0;
+      part = MAC16_16(part,temp1,temp2);
+      part = MAC16_16(part,temp3,temp4);
+      /* HINT: If you had a 40-bit accumulator, you could shift only at the end */
+      sum = ADD32(sum,SHR32(part,6));
+   }
+   return sum;
 }

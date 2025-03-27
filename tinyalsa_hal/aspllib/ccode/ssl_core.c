@@ -12,33 +12,35 @@
 #include <math.h>
 #include <stdlib.h>
 
-// #include "fftw3.h"
 #include "pffft.h"
-
 #include "sys.h"
 #include "ssl_vad.h"
 #include "ssl_core.h"
-
 #include "debug_file.h"
 
-// #define ITD_min2 -45
-// #define ITD_max2 45
-// #define ITD_size2 91
+// #define PRINT_DEBUG_SSL_INPUT
+// #define PRINT_DEBUG_SSL
+// #define PRINT_DEBUG_SSL2
+// #define SEND_DEBUG_DOA
+// #define SEND_DEBUG_CCVF
+// #define PRINT_DEBUG_NOISEFLOOR
+// #define PRINT_DEBUG_PEAKMAX
 
-// double DoA_range2[ITD_size2] = {
-// -106.0000000000000000, -102.0000000000000000, -98.0000000000000000, -92.0000000000000000, -90.0000000000000000, -78.0880368502509583, -72.5548266981395784, -68.3636287222933845, 
-// -64.8341900134877420, -61.7171618690415897, -58.8878655099334054, -56.2733567598767763, -53.8265957939603155, -51.5151494559212537, -49.3155317724449489, -47.2100838050384226, 
-// -45.1851255687781261, -43.2297984698112927, -41.3353069602031411, -39.4944030479295307, -37.7010248842574285, -35.9500366196465748, -34.2370368552561999, -32.5582147829602064, 
-// -30.9102402394157814, -29.2901783640954747, -27.6954224249286050, -26.1236402714978624, -24.5727311550183423, -23.0407905346264563, -21.5260811061720787, -20.0270087287294913, 
-// -18.5421022412120990, -17.0699963936886761, -15.6094172900828649, -14.1591698678695792, -12.7181270379390092, -11.2852201822631883, -9.8594307642649888, -8.4397828510964104, 
-// -7.0253363814638146, -5.6151810394490509, -4.2084306156316202, -2.8042177529478285, -1.4016889870381044, 0.0000000000000000, 1.4016889870381044, 2.8042177529478285, 
-// 4.2084306156316202, 5.6151810394490509, 7.0253363814638146, 8.4397828510964104, 9.8594307642649888, 11.2852201822631883, 12.7181270379390092, 14.1591698678695792, 
-// 15.6094172900828649, 17.0699963936886761, 18.5421022412120990, 20.0270087287294913, 21.5260811061720787, 23.0407905346264563, 24.5727311550183423, 26.1236402714978624, 
-// 27.6954224249286050, 29.2901783640954747, 30.9102402394157814, 32.5582147829602064, 34.2370368552561999, 35.9500366196465748, 37.7010248842574285, 39.4944030479295307, 
-// 41.3353069602031411, 43.2297984698112927, 45.1851255687781261, 47.2100838050384226, 49.3155317724449489, 51.5151494559212537, 53.8265957939603155, 56.2733567598767763, 
-// 58.8878655099334054, 61.7171618690415897, 64.8341900134877420, 68.3636287222933845, 72.5548266981395784, 78.0880368502509583, 90.0000000000000000, 92.0000000000000000, 
-// 98.0000000000000000, 102.0000000000000000, 106.0000000000000000
-// };
+#define ccv_avg_size 32
+#define max_DoA_local 110
+#define E_avr_max 60.0
+
+#define avgsize2 128 //128 //64
+#define vad_idx_total 6 // NUM_FRAMES/ssl_blocksize
+#define MAX_INT16 32767.0f
+#define NUM_SAMPLES 256
+
+#define ALPHA_fast 0.05 // 평활화 계수
+#define ALPHA_slow 0.001 // 평활화 계수
+#define ALPHA_fast2 0.5 // 평활화 계수
+#define ALPHA_slow2 0.00001 // 평활화 계수
+
+#define CLUSTER_LENG 32
 
 #define ITD_min2 -45
 #define ITD_max2 45
@@ -59,32 +61,8 @@ double DoA_range2[ITD_size2] = {
 	90.0000000000000000, 90.0000000000000000, 90.0000000000000000
 };
 
-
-// #define PRINT_DEBUG_SSL_INPUT
-// #define PRINT_DEBUG_SSL
-// #define PRINT_DEBUG_SSL2
-// #define SEND_DEBUG_DOA
-// #define SEND_DEBUG_CCVF
-// #define PRINT_DEBUG_NOISEFLOOR
-// #define PRINT_DEBUG_PEAKMAX
-
-#define ccv_avg_size 32
-#define ccv_stored_min_def 2
-#define ccv_stored_min2_def 2
-
-#define DoA_min -90
-#define DoA_max 90
-
-#define Cth 0.004
-
-#define max_DoA_local 110
-#define max_DoA_local_wall 80
-
-#define E_avr_max 60.0
-
-
-int hanning_w[ssl_blocksize]=
-	{5	, 20	,44 ,78 ,122	,176	,239	,312	,
+int hanning_w[ssl_blocksize]={
+	5	, 20	,44 ,78 ,122	,176	,239	,312	,
 	395 ,487	,589	,700	,821	,950	,1089	,1238	,
 	1395	,1561	,1736	,1920	,2112	,2313	,2523	,2740	,
 	2966	,3200	,3442	,3691	,3948	,4213	,4484	,4763	,
@@ -115,68 +93,7 @@ int hanning_w[ssl_blocksize]=
 	4763	,4484	,4213	,3948	,3691	,3442	,3200	,2966	,
 	2740	,2523	,2313	,2112	,1920	,1736	,1561	,1395	,
 	1238	,1089	,950	,821	,700	,589	,487	,395	,
-	312 ,239	,176	,122	,78 ,44 ,20 ,5	};
-
-int hanning_w512[ssl_blocksize512] = {
-    1, 5, 11, 20, 31, 44, 60, 79, 99, 123, 148, 177, 207, 240, 276, 314, 
-    354, 397, 442, 489, 539, 591, 646, 703, 762, 824, 888, 954, 1023, 1094, 1167, 1242, 
-    1320, 1400, 1482, 1567, 1654, 1743, 1834, 1927, 2023, 2120, 2220, 2322, 2426, 2532, 2640, 2751, 
-    2863, 2977, 3094, 3212, 3332, 3455, 3579, 3705, 3833, 3963, 4095, 4228, 4364, 4501, 4640, 4781, 
-    4923, 5068, 5214, 5361, 5511, 5661, 5814, 5968, 6124, 6281, 6440, 6600, 6762, 6925, 7089, 7255, 
-    7423, 7591, 7761, 7932, 8105, 8279, 8454, 8630, 8807, 8986, 9165, 9346, 9528, 9711, 9894, 10079, 
-    10265, 10451, 10639, 10827, 11016, 11206, 11397, 11589, 11781, 11974, 12167, 12362, 12556, 12752, 12948, 13144, 
-    13341, 13539, 13736, 13935, 14133, 14332, 14531, 14731, 14931, 15131, 15331, 15531, 15732, 15932, 16133, 16333, 
-    16534, 16735, 16935, 17136, 17336, 17536, 17736, 17936, 18136, 18335, 18534, 18733, 18932, 19130, 19327, 19524, 
-    19721, 19917, 20113, 20308, 20503, 20697, 20890, 21082, 21274, 21465, 21656, 21845, 22034, 22222, 22409, 22595, 
-    22780, 22965, 23148, 23330, 23511, 23692, 23871, 24048, 24225, 24401, 24575, 24748, 24920, 25091, 25260, 25428, 
-    25595, 25760, 25924, 26086, 26247, 26407, 26565, 26721, 26876, 27029, 27181, 27331, 27480, 27627, 27772, 27915, 
-    28057, 28197, 28335, 28471, 28606, 28738, 28869, 28998, 29125, 29251, 29374, 29495, 29614, 29732, 29847, 29960, 
-    30072, 30181, 30288, 30393, 30496, 30597, 30696, 30792, 30887, 30979, 31069, 31157, 31243, 31326, 31407, 31486, 
-    31563, 31637, 31709, 31779, 31846, 31912, 31974, 32035, 32093, 32149, 32202, 32253, 32302, 32348, 32392, 32434, 
-    32473, 32509, 32544, 32575, 32605, 32632, 32656, 32678, 32698, 32715, 32730, 32742, 32752, 32759, 32764, 32767, 
-    32767, 32764, 32759, 32752, 32742, 32730, 32715, 32698, 32678, 32656, 32632, 32605, 32575, 32544, 32509, 32473, 
-    32434, 32392, 32348, 32302, 32253, 32202, 32149, 32093, 32035, 31974, 31912, 31846, 31779, 31709, 31637, 31563, 
-    31486, 31407, 31326, 31243, 31157, 31069, 30979, 30887, 30792, 30696, 30597, 30496, 30393, 30288, 30181, 30072, 
-    29960, 29847, 29732, 29614, 29495, 29374, 29251, 29125, 28998, 28869, 28738, 28606, 28471, 28335, 28197, 28057, 
-    27915, 27772, 27627, 27480, 27331, 27181, 27029, 26876, 26721, 26565, 26407, 26247, 26086, 25924, 25760, 25595, 
-    25428, 25260, 25091, 24920, 24748, 24575, 24401, 24225, 24048, 23871, 23692, 23511, 23330, 23148, 22965, 22780, 
-    22595, 22409, 22222, 22034, 21845, 21656, 21465, 21274, 21082, 20890, 20697, 20503, 20308, 20113, 19917, 19721, 
-    19524, 19327, 19130, 18932, 18733, 18534, 18335, 18136, 17936, 17736, 17536, 17336, 17136, 16935, 16735, 16534, 
-    16333, 16133, 15932, 15732, 15531, 15331, 15131, 14931, 14731, 14531, 14332, 14133, 13935, 13736, 13539, 13341, 
-    13144, 12948, 12752, 12556, 12362, 12167, 11974, 11781, 11589, 11397, 11206, 11016, 10827, 10639, 10451, 10265, 
-    10079, 9894, 9711, 9528, 9346, 9165, 8986, 8807, 8630, 8454, 8279, 8105, 7932, 7761, 7591, 7423, 
-    7255, 7089, 6925, 6762, 6600, 6440, 6281, 6124, 5968, 5814, 5661, 5511, 5361, 5214, 5068, 4923, 
-    4781, 4640, 4501, 4364, 4228, 4095, 3963, 3833, 3705, 3579, 3455, 3332, 3212, 3094, 2977, 2863, 
-    2751, 2640, 2532, 2426, 2322, 2220, 2120, 2023, 1927, 1834, 1743, 1654, 1567, 1482, 1400, 1320, 
-    1242, 1167, 1094, 1023, 954, 888, 824, 762, 703, 646, 591, 539, 489, 442, 397, 354, 
-    314, 276, 240, 207, 177, 148, 123, 99, 79, 60, 44, 31, 20, 11, 5, 1
-};
-
-int E_idx_wall[8][3]={{0, 0, 0}, {0, 0, 1}, {0, 1, 0}, {0, 1, 1},
-			          {1, 0, 0}, {1, 0, 1}, {1, 1, 0}, {1, 1, 1}};
-
-int E_idx[16][4]={{0, 0, 0, 0}, {0, 0, 0, 1}, {0, 0, 1, 0}, {0, 0, 1, 1},
-			   {0, 1, 0, 0}, {0, 1, 0, 1}, {0, 1, 1, 0}, {0, 1, 1, 1},			   
-			   {1, 0, 0, 0}, {1, 0, 0, 1}, {1, 0, 1, 0}, {1, 0, 1, 1},
-			   {1, 1, 0, 0}, {1, 1, 0, 1}, {1, 1, 1, 0}, {1, 1, 1, 1}};		
-
-int E_idx64[64][6] = {
-    {0, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 1}, {0, 0, 0, 0, 1, 0}, {0, 0, 0, 0, 1, 1},
-    {0, 0, 0, 1, 0, 0}, {0, 0, 0, 1, 0, 1}, {0, 0, 0, 1, 1, 0}, {0, 0, 0, 1, 1, 1},
-    {0, 0, 1, 0, 0, 0}, {0, 0, 1, 0, 0, 1}, {0, 0, 1, 0, 1, 0}, {0, 0, 1, 0, 1, 1},
-    {0, 0, 1, 1, 0, 0}, {0, 0, 1, 1, 0, 1}, {0, 0, 1, 1, 1, 0}, {0, 0, 1, 1, 1, 1},
-    {0, 1, 0, 0, 0, 0}, {0, 1, 0, 0, 0, 1}, {0, 1, 0, 0, 1, 0}, {0, 1, 0, 0, 1, 1},
-    {0, 1, 0, 1, 0, 0}, {0, 1, 0, 1, 0, 1}, {0, 1, 0, 1, 1, 0}, {0, 1, 0, 1, 1, 1},
-    {0, 1, 1, 0, 0, 0}, {0, 1, 1, 0, 0, 1}, {0, 1, 1, 0, 1, 0}, {0, 1, 1, 0, 1, 1},
-    {0, 1, 1, 1, 0, 0}, {0, 1, 1, 1, 0, 1}, {0, 1, 1, 1, 1, 0}, {0, 1, 1, 1, 1, 1},
-    {1, 0, 0, 0, 0, 0}, {1, 0, 0, 0, 0, 1}, {1, 0, 0, 0, 1, 0}, {1, 0, 0, 0, 1, 1},
-    {1, 0, 0, 1, 0, 0}, {1, 0, 0, 1, 0, 1}, {1, 0, 0, 1, 1, 0}, {1, 0, 0, 1, 1, 1},
-    {1, 0, 1, 0, 0, 0}, {1, 0, 1, 0, 0, 1}, {1, 0, 1, 0, 1, 0}, {1, 0, 1, 0, 1, 1},
-    {1, 0, 1, 1, 0, 0}, {1, 0, 1, 1, 0, 1}, {1, 0, 1, 1, 1, 0}, {1, 0, 1, 1, 1, 1},
-    {1, 1, 0, 0, 0, 0}, {1, 1, 0, 0, 0, 1}, {1, 1, 0, 0, 1, 0}, {1, 1, 0, 0, 1, 1},
-    {1, 1, 0, 1, 0, 0}, {1, 1, 0, 1, 0, 1}, {1, 1, 0, 1, 1, 0}, {1, 1, 0, 1, 1, 1},
-    {1, 1, 1, 0, 0, 0}, {1, 1, 1, 0, 0, 1}, {1, 1, 1, 0, 1, 0}, {1, 1, 1, 0, 1, 1},
-    {1, 1, 1, 1, 0, 0}, {1, 1, 1, 1, 0, 1}, {1, 1, 1, 1, 1, 0}, {1, 1, 1, 1, 1, 1}
+	312 ,239	,176	,122	,78 ,44 ,20 ,5
 };
 
 int X_L[ssl_blocksize];
@@ -184,16 +101,6 @@ int X_R[ssl_blocksize];
 int X_F[ssl_blocksize];
 int X_B[ssl_blocksize];
 int X_C[ssl_blocksize];
-
-int X_L512[ssl_blocksize512];
-int X_R512[ssl_blocksize512];
-int X_F512[ssl_blocksize512];
-int X_B512[ssl_blocksize512];
-
-// fftwf_complex *sslFFTinput_L, *sslFFTinput_R, *sslFFTinput_F, *sslFFT_L, *sslFFT_R, *sslFFT_F;
-// fftwf_complex *CCVF, *ccv_temp;
-
-// fftwf_plan ssl_L_p,ssl_R_p,ssl_F_p, ssl_ccv_p;
 
 PFFFT_Setup *ssl_L_p = NULL;
 PFFFT_Setup *ssl_R_p = NULL;
@@ -205,10 +112,8 @@ PFFFT_Setup *ssl_ccv_RL_p = NULL;
 PFFFT_Setup *ssl_ccv_LF_p = NULL;
 PFFFT_Setup *ssl_ccv_FR_p = NULL;
 PFFFT_Setup *ssl_ccv_FB_p = NULL;
-
 PFFFT_Setup *ssl_ccv_BR_p = NULL;
 PFFFT_Setup *ssl_ccv_LB_p = NULL;
-
 PFFFT_Setup *ssl_ccv_LR_p = NULL;
 PFFFT_Setup *ssl_ccv_LC_p = NULL;
 PFFFT_Setup *ssl_ccv_CR_p = NULL;
@@ -233,26 +138,14 @@ float *pffftccvwork = NULL;
 
 int fbin_min;
 int fbin_max;
-
 int fsup_ssl_blocksize;
 
 double ccv_RL[ccv_avg_size][ITD_size2];
-// double ccv_LF[ccv_avg_size][ITD_size];
-// double ccv_FR[ccv_avg_size][ITD_size];
 double ccv_FB[ccv_avg_size][ITD_size2];
-
-// double ccv_BR[ccv_avg_size][ITD_size];
-// double ccv_LB[ccv_avg_size][ITD_size];
-
 double ccv_LR[ccv_avg_size][ITD_size2];
-// double ccv_LC[ccv_avg_size][ITD_size3];
-// double ccv_CR[ccv_avg_size][ITD_size3];
 
 double peaktemp[ccv_avg_size];
 double peaklevel[ccv_avg_size];
-
-
-#define CLUSTER_LENG 32
 
 double cluster[5][CLUSTER_LENG];
 double cluster_power[5][CLUSTER_LENG];
@@ -260,33 +153,43 @@ int16_t cluster_idx[5] = {0, 0, 0, 0, 0};
 int16_t cluster_ccvidx[5][CLUSTER_LENG];
 
 float deno;
-float deno512;
 double deno2;
 
+static int ccv_idx=0;
+static int ccv_stored=0;
+static int prev_vad=0;
+
+double g_noise_floor = 1.0000e-03;
+double g_max_peak  = 1.0000e-03;
+float g_e_curr_dB = -60;
+float g_max_peak_dB = -60;
+float g_max_rms_dB  = -60;
+int peakmax_ccv_idx =0;
+int sslhold = 0;
+
+int g_ssl_ccf_sent = 1;
+
+int ITD2_local_min;
+int ITD2_local_max;
 
 sslInst_t Sys_sslInst;
 
+void free_pfft_alined(float **X);
+void destroy_pfft_setup(PFFFT_Setup **s);
+
 sslInst_t* sysSSLCORECreate()
 {
-    ssl_core_Init(&Sys_sslInst);
+	ssl_core_Init(&Sys_sslInst);
 	return &Sys_sslInst;
 }
 
-int ITD_local_min;
-int ITD_local_max;
-int ITD2_local_min;
-int ITD2_local_max;
-int ITD3_local_min;
-int ITD3_local_max;
-
 void ssl_core_Init(sslInst_t *sslInst){
-
+	
 	int n, m;
-
 	double fmin=50;
 	double fmax=5000;
 	double fs=16000;
-
+	
 	sslInst->fbin_min=(int)((double)ssl_blocksize*fmin/fs);
 	sslInst->fbin_max=(int)((double)ssl_blocksize*fmax/fs+0.5);
 
@@ -294,11 +197,9 @@ void ssl_core_Init(sslInst_t *sslInst){
 	sslInst->gun_trig_thresold2=30;	
 
 	fsup_ssl_blocksize=ssl_blocksize*16;
-
+	
 	sslInst->CCVth = 0.000200;
-
 	sslInst->ccv_stored_min = 1;
-
 	sslInst->ccv_last_num = 2;
 
 	sslInst->gate_dB = -130.0;
@@ -306,34 +207,33 @@ void ssl_core_Init(sslInst_t *sslInst){
 	deno=(1.0/((float)((int)ssl_blocksize*(int)32768)));	
 	deno2=(1.0/((double)fsup_ssl_blocksize));	
 	
-    int cplx = 0;
-    int N = ssl_blocksize;
-    int Nfloat = (cplx ? N*2 : N);
-    int Nbytes = Nfloat * sizeof(float);
-    sslFFTinput_L = pffft_aligned_malloc(Nbytes);
-    sslFFTinput_R = pffft_aligned_malloc(Nbytes);
+	int cplx = 0;
+	int N = ssl_blocksize;
+	int Nfloat = (cplx ? N*2 : N);
+	int Nbytes = Nfloat * sizeof(float);
+	sslFFTinput_L = pffft_aligned_malloc(Nbytes);
+	sslFFTinput_R = pffft_aligned_malloc(Nbytes);
 	sslFFTinput_F = pffft_aligned_malloc(Nbytes);
 	sslFFTinput_B = pffft_aligned_malloc(Nbytes);
-    sslFFT_L = pffft_aligned_malloc(Nbytes);
+	sslFFT_L = pffft_aligned_malloc(Nbytes);
 	sslFFT_R = pffft_aligned_malloc(Nbytes);
 	sslFFT_F = pffft_aligned_malloc(Nbytes);
 	sslFFT_B = pffft_aligned_malloc(Nbytes);
 
-    pffftsslwork = pffft_aligned_malloc(Nbytes);
+	pffftsslwork = pffft_aligned_malloc(Nbytes);
 
-    // PFFFT benchmark
-    ssl_L_p = pffft_new_setup(ssl_blocksize, cplx ? PFFFT_COMPLEX : PFFFT_REAL);
+	 // PFFFT benchmark
+	ssl_L_p = pffft_new_setup(ssl_blocksize, cplx ? PFFFT_COMPLEX : PFFFT_REAL);
 	ssl_R_p = pffft_new_setup(ssl_blocksize, cplx ? PFFFT_COMPLEX : PFFFT_REAL);
 	ssl_F_p = pffft_new_setup(ssl_blocksize, cplx ? PFFFT_COMPLEX : PFFFT_REAL);
 	ssl_B_p = pffft_new_setup(ssl_blocksize, cplx ? PFFFT_COMPLEX : PFFFT_REAL);
 
-
-    cplx = 1;
-    N = fsup_ssl_blocksize;
-    Nfloat = (cplx ? N*2 : N);
-    Nbytes = Nfloat * sizeof(float);
-    CCVF = pffft_aligned_malloc(Nbytes);
-    ccv_temp = pffft_aligned_malloc(Nbytes);
+	cplx = 1;
+	N = fsup_ssl_blocksize;
+	Nfloat = (cplx ? N*2 : N);
+	Nbytes = Nfloat * sizeof(float);
+	CCVF = pffft_aligned_malloc(Nbytes);
+	ccv_temp = pffft_aligned_malloc(Nbytes);
 
 	pffftccvwork = pffft_aligned_malloc(Nbytes);
 
@@ -371,35 +271,29 @@ void ssl_core_Init(sslInst_t *sslInst){
 			ccv_FB[n][m]=0.0;
 		}
 	}
-
 }
-
-
-void free_pfft_alined(float **X);
-void destroy_pfft_setup(PFFFT_Setup **s);
 
 void ssl_core_DeInit(){
 
-    free_pfft_alined(&sslFFTinput_L);
-    free_pfft_alined(&sslFFTinput_R);
+	free_pfft_alined(&sslFFTinput_L);
+	free_pfft_alined(&sslFFTinput_R);
 	free_pfft_alined(&sslFFTinput_F);
 	free_pfft_alined(&sslFFTinput_B);
-    free_pfft_alined(&sslFFT_L);
+	free_pfft_alined(&sslFFT_L);
 	free_pfft_alined(&sslFFT_R);
 	free_pfft_alined(&sslFFT_F);
 	free_pfft_alined(&sslFFT_B);
 
-    free_pfft_alined(&pffftsslwork);
+	free_pfft_alined(&pffftsslwork);
 
-    // PFFFT benchmark
-    destroy_pfft_setup(&ssl_L_p);
+	 // PFFFT benchmark
+	destroy_pfft_setup(&ssl_L_p);
 	destroy_pfft_setup(&ssl_R_p);
 	destroy_pfft_setup(&ssl_F_p);
 	destroy_pfft_setup(&ssl_B_p);
 
-
-    free_pfft_alined(&CCVF);
-    free_pfft_alined(&ccv_temp);
+	free_pfft_alined(&CCVF);
+	free_pfft_alined(&ccv_temp);
 
 	free_pfft_alined(&pffftccvwork);
 
@@ -410,51 +304,24 @@ void ssl_core_DeInit(){
 }
 
 void destroy_pfft_setup(PFFFT_Setup **s){
-    if (*s!=NULL) {
-        pffft_destroy_setup(*s);
-        *s=NULL;
-    }
+	if (*s!=NULL) {
+		pffft_destroy_setup(*s);
+		*s=NULL;
+	}
 }
 
 void free_pfft_alined(float **X){
-
-    if (*X!=NULL) {
-        pffft_aligned_free(*X);
-        *X=NULL;
-    }
+	if (*X!=NULL) {
+		pffft_aligned_free(*X);
+		*X=NULL;
+	}
 }
 
-static int ccv_idx=0;
-static int ccv_stored=0;
-
-static int prev_vad=0;
-
-
-#define avgsize 64 //128 //64
-#define avgsize2 128 //128 //64
-#define vad_idx_total 6 // NUM_FRAMES/ssl_blocksize
-
-extern int e_hist_Buf[4][avgsize2+vad_idx_total-1];
-extern double g_x_slow_vad[2];
-
-double g_noise_floor = 1.0000e-03;
-double g_max_peak  = 1.0000e-03;
-float g_e_curr_dB = -60;
-float g_max_peak_dB = -60;
-float g_max_rms_dB  = -60;
-int peakmax_ccv_idx =0;
-int sslhold = 0;
-
-int g_ssl_ccf_sent = 1;
-
 void ssl_core_process_2ch(sslInst_t *sslInst, short *in_L, short *in_R, double *DoA_mean_p, int mode, short ext_vad) {
-	
-	*DoA_mean_p = -1;
 
 	int i, j, n, m;
 	int idx_pick = -1;
 	double temp_real, temp_imaj, temp_abs, DoA_temp, DoA_mean_temp;
-
 	double ccv_thre_RL_mean=0.0;
 	double ccv_thre_RL_max=-INFINITY;
 
@@ -541,7 +408,7 @@ void ssl_core_process_2ch(sslInst_t *sslInst, short *in_L, short *in_R, double *
 	if ((ssl_vad>0)||(ext_vad>0)){		
 
 		ccv_stored++;
-        if (ccv_stored>ccv_avg_size) ccv_stored=ccv_avg_size;
+		if (ccv_stored>ccv_avg_size) ccv_stored=ccv_avg_size;
 
 		if ((max_peak_dbfs_prev+0.5)<=e_curr_peak_dB) peakmax_ccv_idx=ccv_idx;
 
@@ -632,8 +499,8 @@ void ssl_core_process_2ch(sslInst_t *sslInst, short *in_L, short *in_R, double *
 				ccv_RL[i][m]=0.0;	
 			}
 		}
-        ccv_idx=0;
-        ccv_stored=0;
+		ccv_idx=0;
+		ccv_stored=0;
 		peakmax_ccv_idx=0;	
 	}
 
@@ -874,7 +741,7 @@ void calculate_ccv(PFFFT_Setup *ssl_ccv_p, double * ccv,
 		/*-------------------- make ccv_LF --------------------*/
 		int Nbytes = 2 * fsup_ssl_blocksize * sizeof(float);
 		memset(CCVF, 0, Nbytes);
-	    calculate_CCVF(FFT1, FFT2, CCVF, fbin_min, fbin_max, fsup_ssl_blocksize, gate_dB);
+		calculate_CCVF(FFT1, FFT2, CCVF, fbin_min, fbin_max, fsup_ssl_blocksize, gate_dB);
 		pffft_transform_ordered(ssl_ccv_p, CCVF, ccv_temp, pffftccvwork, PFFFT_BACKWARD);
 
 		for (int i=0; i<=colsize; i++){			
@@ -898,19 +765,19 @@ void calculate_CCVF(float* FFT1, float* FFT2, float* CCVF,
 	float temp_imaj[ssl_blocksize*16];
 	float temp_abs[ssl_blocksize*16];
 
-    int m = fsup_ssl_blocksize - fbin_min;
+	int m = fsup_ssl_blocksize - fbin_min;
 
 	float abs_avr = 0.0;
 	float abs_max = 0.0;
-    for (int i = fbin_min; i <= fbin_max; i++) {
-        temp_real[m] = FFT1[2 * i] * FFT2[2 * i] + FFT1[2 * i + 1] * FFT2[2 * i + 1];
-        temp_imaj[m] = FFT1[2 * i + 1] * FFT2[2 * i] - FFT1[2 * i] * FFT2[2 * i + 1];
-        temp_abs[m] = sqrtf(temp_real[m] * temp_real[m] + temp_imaj[m] * temp_imaj[m]);
+	for (int i = fbin_min; i <= fbin_max; i++) {
+		temp_real[m] = FFT1[2 * i] * FFT2[2 * i] + FFT1[2 * i + 1] * FFT2[2 * i + 1];
+		temp_imaj[m] = FFT1[2 * i + 1] * FFT2[2 * i] - FFT1[2 * i] * FFT2[2 * i + 1];
+		temp_abs[m] = sqrtf(temp_real[m] * temp_real[m] + temp_imaj[m] * temp_imaj[m]);
 
 		abs_avr += temp_abs[m];
 		if (abs_max<temp_abs[m]) abs_max = temp_abs[m];
-        m--;
-    }
+		m--;
+	}
 
 	abs_avr /= (float)(fbin_max-fbin_min+1);
 
@@ -920,8 +787,8 @@ void calculate_CCVF(float* FFT1, float* FFT2, float* CCVF,
 
 	// printf("abs_avr=%f,abs_max=%f abs_max*gate_ratio=%f\r\n", abs_avr, abs_max, (abs_max*gate_ratio));
 
-    m = fsup_ssl_blocksize - fbin_min;
-    for (int i = fbin_min; i <= fbin_max; i++) {
+	m = fsup_ssl_blocksize - fbin_min;
+	for (int i = fbin_min; i <= fbin_max; i++) {
 
 		if ((abs_max*gate_ratio)<=temp_abs[m]) {
 			CCVF[2 * i] = temp_real[m] / temp_abs[m];
@@ -938,8 +805,8 @@ void calculate_CCVF(float* FFT1, float* FFT2, float* CCVF,
 			CCVF[2 * m] = CCVF[2 * i]; //0; //CCVF[2 * i];
 			CCVF[2 * m + 1] = -1.0 * CCVF[2 * i + 1]; //0; //-1.0 * CCVF[2 * i + 1];
 		}       
-        m--;
-    }	
+		m--;
+	}	
 }
 
 void calculate_peak_temp_total(double *peaklevel, double *peaktemp, double *peaktotal, double r, int ccv_stored, int peakmax_ccv_idx){
@@ -1000,311 +867,74 @@ void calculate_ccv_mean(int mode,
 	*ccv_thre_mean=*ccv_thre_mean/(double)(itd_size);
 }
 
-#define MAX_INT16 32767.0f
-#define NUM_SAMPLES 256
-
-// dBFS Peak 계산 함수
-dBFSResult calculate_dBFS_peak_and_ratio(int16_t samples[], size_t num_samples) {
-    int16_t max_value = 0;
-
-    // 샘플의 최대 절대값 찾기
-    for (size_t i = 0; i < num_samples; ++i) {
-        if (abs(samples[i]) > max_value) {
-            max_value = abs(samples[i]);
-        }
-    }
-
-    dBFSResult result;
-
-    // 최대값이 0일 때 (무음)
-    if (max_value == 0) {
-        result.dBFS = -INFINITY; // 무한대 음수
-        result.ratio = 0.0f;
-    } else {
-        // 비율 계산
-        result.ratio = (float)max_value / MAX_INT16;
-        // dBFS 계산
-        result.dBFS = 20.0f * log10f(result.ratio);
-    }
-
-    return result;
-}
-
 dBFSResult calculate_dBFS_peak_and_ratio_multibuf(int16_t* buffers[], size_t num_samples, size_t num_buffers) {
-    int16_t max_value = 0;
+	int16_t max_value = 0;
 
-    // Iterate over each buffer
-    for (size_t buffer_idx = 0; buffer_idx < num_buffers; ++buffer_idx) {
-        // Iterate over each sample in the current buffer
-        for (size_t i = 0; i < num_samples; ++i) {
-            if (abs(buffers[buffer_idx][i]) > max_value) {
-                max_value = abs(buffers[buffer_idx][i]);
-            }
-        }
-    }
-
-    dBFSResult result;
-
-    // If the maximum value is 0, it means silence
-    if (max_value == 0) {
-        result.dBFS = -INFINITY; // Negative infinity for silence
-        result.ratio = 0.0f;
-    } else {
-        // Calculate the ratio of the peak value to the maximum possible value
-        result.ratio =  (float)max_value / MAX_INT16;
-        // Calculate the dBFS value
-        result.dBFS = 20.0f * log10f(result.ratio);
-    }
-
-    return result;
-}
-
-// dBFS 계산 함수
-float calculate_dBFS_peak(int16_t samples[], size_t num_samples) {
-    int16_t max_value = 0;
-    
-    // 샘플의 최대 절대값 찾기
-    for (size_t i = 0; i < num_samples; ++i) {
-        if (abs(samples[i]) > max_value) {
-            max_value = abs(samples[i]);
-        }
-    }
-
-    // 최대값이 0일 때 (무음)
-    if (max_value == 0) {
-        return -INFINITY; // 무한대 음수
-    }
-
-    // dBFS 계산
-    float dBFS = 20.0f * log10f((float)max_value / MAX_INT16);
-    return dBFS;
-}
-
-// dBFS RMS 계산 함수
-float calculate_dBFS_rms(int16_t samples[], size_t num_samples) {
-    float sum_squares = 0.0f;
-
-    // 샘플의 제곱의 합 계산
-    for (size_t i = 0; i < num_samples; ++i) {
-        sum_squares += (float)samples[i] * (float)samples[i];
-    }
-
-    // RMS 계산
-    float rms = sqrtf(sum_squares / num_samples);
-
-    // 최대값이 0일 때 (무음)
-    if (rms == 0) {
-        return -INFINITY; // 무한대 음수
-    }
-
-    // dBFS 계산
-    float dBFS = 20.0f * log10f(rms / MAX_INT16);
-    return dBFS;
-}
-
-// dBFS Peak 계산 함수
-dBFSResult calculate_dBFS_rms_and_ratio(int16_t samples[], size_t num_samples) {
-    float sum_squares = 0.0f;
-
-    // 샘플의 제곱의 합 계산
-    for (size_t i = 0; i < num_samples; ++i) {
-        sum_squares += (float)samples[i] * (float)samples[i];
-    }
+	// Iterate over each buffer
+	for (size_t buffer_idx = 0; buffer_idx < num_buffers; ++buffer_idx) {
+		// Iterate over each sample in the current buffer
+		for (size_t i = 0; i < num_samples; ++i) {
+			if (abs(buffers[buffer_idx][i]) > max_value) {
+				max_value = abs(buffers[buffer_idx][i]);
+			}
+		}
+	}
 
 	dBFSResult result;
 
-    // RMS 계산
-    float rms = sqrtf(sum_squares / num_samples);
+	// If the maximum value is 0, it means silence
+	if (max_value == 0) {
+		result.dBFS = -INFINITY; // Negative infinity for silence
+		result.ratio = 0.0f;
+	} else {
+		// Calculate the ratio of the peak value to the maximum possible value
+		result.ratio =  (float)max_value / MAX_INT16;
+		// Calculate the dBFS value
+		result.dBFS = 20.0f * log10f(result.ratio);
+	}
 
-    // 최대값이 0일 때 (무음)
-    if (rms == 0) {
-        result.dBFS = -INFINITY; // 무한대 음수
-        result.ratio = 0.0f;
-    } else {
-        // 비율 계산
-        result.ratio = (float)rms / MAX_INT16;
-        // dBFS 계산
-        result.dBFS = 20.0f * log10f(result.ratio);
-    }
-
-    return result;
+	return result;
 }
 
 dBFSResult calculate_dBFS_rms_and_ratio_multibuf(int16_t* buffers[], size_t num_samples, size_t num_buffers) {
-    float sum_squares = 0.0f;
-    size_t total_samples = num_samples * num_buffers; // 전체 샘플 수 계산
+	float sum_squares = 0.0f;
+	size_t total_samples = num_samples * num_buffers; // 전체 샘플 수 계산
 
-    // 모든 버퍼의 샘플 제곱의 합 계산
-    for (size_t buffer_idx = 0; buffer_idx < num_buffers; ++buffer_idx) {
-        for (size_t i = 0; i < num_samples; ++i) {
-            sum_squares += (float)buffers[buffer_idx][i] * (float)buffers[buffer_idx][i];
-        }
-    }
+	// 모든 버퍼의 샘플 제곱의 합 계산
+	for (size_t buffer_idx = 0; buffer_idx < num_buffers; ++buffer_idx) {
+		for (size_t i = 0; i < num_samples; ++i) {
+			sum_squares += (float)buffers[buffer_idx][i] * (float)buffers[buffer_idx][i];
+		}
+	}
 
-    dBFSResult result;
+	dBFSResult result;
 
-    // RMS 계산
-    float rms = sqrtf(sum_squares / total_samples);
+	// RMS 계산
+	float rms = sqrtf(sum_squares / total_samples);
 
-    // 최대값이 0일 때 (무음)
-    if (rms == 0) {
-        result.dBFS = -INFINITY; // 무한대 음수
-        result.ratio = 0.0f;
-    } else {
-        // 비율 계산
-        result.ratio = rms / MAX_INT16;
-        // dBFS 계산
-        result.dBFS = 20.0f * log10f(result.ratio);
-    }
+	// 최대값이 0일 때 (무음)
+	if (rms == 0) {
+		result.dBFS = -INFINITY; // 무한대 음수
+		result.ratio = 0.0f;
+	} else {
+		// 비율 계산
+		result.ratio = rms / MAX_INT16;
+		// dBFS 계산
+		result.dBFS = 20.0f * log10f(result.ratio);
+	}
 
-    return result;
+	return result;
 }
-
-int countZeroCrossings(int16_t *buffer, int size) {
-    int zeroCrossings = 0;
-
-    // 버퍼의 처음부터 끝까지 루프
-    for (int i = 1; i < size; ++i) {
-        // 현재 샘플과 이전 샘플이 서로 다른 부호를 가지는지 확인
-        if ((buffer[i-1] >= 0 && buffer[i] < 0) || (buffer[i-1] < 0 && buffer[i] >= 0)) {
-            zeroCrossings++;
-        }
-    }
-
-    return zeroCrossings;
-}
-
-void find_outlier_and_average(double arr[], int size, double *average) {
-
-    if (size != 4) {
-        printf("The size of the array must be 4.\n");
-        return;
-    }
-
-    double sum = 0.0;
-
-    // Calculate the sum of all values
-    for (int i = 0; i < size; i++) {
-        sum += arr[i];
-    }
-
-    // Calculate the average of all values
-    double overall_average = sum / size;
-
-    double distances[4];
-    double max_distance = 0.0;
-    int outlier_idx = 0;
-
-    // Calculate distances from each value to the overall average
-    for (int i = 0; i < size; i++) {
-        distances[i] = fabs(arr[i] - overall_average);
-        if (distances[i] > max_distance) {
-            max_distance = distances[i];
-            outlier_idx = i;
-        }
-    }
-
-	// printf("outlier_idx = %d ,", outlier_idx);
-
-    // Calculate the average of the three closest values
-    sum = 0.0;
-    for (int i = 0; i < size; i++) {
-        if (i != outlier_idx) {
-            sum += arr[i];
-			// printf("arr[%d] = %f, ", i, arr[i]);
-        }
-    }
-
-    *average = sum / 3;
-
-	// printf("average = %f\r\n", *average);
-}
-
-int find_outlier(double arr[], int size) {
-
-    if (size != 4) {
-        printf("The size of the array must be 4.\n");
-        return -1;
-    }
-
-    // Calculate the average of all values
-    double overall_average = phase_average(arr, size);
-
-    double distances[4];
-    double max_distance = 0.0;
-    int outlier_idx = 0;
-
-    // Calculate distances from each value to the overall average
-    for (int i = 0; i < size; i++) {
-        distances[i] = abs(phase_difference(arr[i] , overall_average));
-        if (distances[i] > max_distance) {
-            max_distance = distances[i];
-            outlier_idx = i;
-        }
-    }
-
-	// printf("outlier_idx = %d degree = %.2f\r\n", outlier_idx, arr[outlier_idx]);
-	return outlier_idx;
-}
-
-double find_two_outliers(double arr[], int size, int* outlier_idx1, int* outlier_idx2) {
-
-    if (size < 4) {
-        printf("The size of the array must be greater than 4.\n");
-        return -1000;
-    }
-
-    // Calculate the average of all values
-    double overall_average = phase_average(arr, size);
-
-    double distances[6];
-    int first_max_idx = 0, second_max_idx = 0;
-    double first_max_distance = 0.0, second_max_distance = 0.0;
-
-    // Calculate distances from each value to the overall average
-    for (int i = 0; i < size; i++) {
-        distances[i] = abs(phase_difference(arr[i], overall_average));
-
-        if (distances[i] > first_max_distance) {
-            second_max_distance = first_max_distance;
-            second_max_idx = first_max_idx;
-
-            first_max_distance = distances[i];
-            first_max_idx = i;
-        } else if (distances[i] > second_max_distance) {
-            second_max_distance = distances[i];
-            second_max_idx = i;
-        }
-    }
-
-    *outlier_idx1 = first_max_idx;
-    *outlier_idx2 = second_max_idx;
-
-    // printf("outlier_idx1 = %d degree = %.2f\r\n", *outlier_idx1, arr[*outlier_idx1]);
-    // printf("outlier_idx2 = %d degree = %.2f\r\n", *outlier_idx2, arr[*outlier_idx2]);
-
-	return overall_average;
-}
-
-#define THRESHOLD_DB 20.0
-#define ALPHA 0.05 // 평활화 계수
-#define ALPHA2 0.001 // 평활화 계수
-#define ALPHA3 0.000001 // 평활화 계수
-#define ALPHA4 0.5 // 평활화 계수
-
-
 
 // 노이즈 플로어를 업데이트하는 함수
 double update_noise_floor(double new_rms, double new_peak, double *p_noise_floor, double threshold_dB) {
 
-    double noise_floor_dbfs = calculate_dbfs(*p_noise_floor);
-    double new_rms_dbfs 	= calculate_dbfs(new_rms);
+	double noise_floor_dbfs = calculate_dbfs(*p_noise_floor);
+	double new_rms_dbfs 	= calculate_dbfs(new_rms);
 	double new_peak_dbfs    = calculate_dbfs(new_peak);
 
-#define ALPHA_fast 0.05 // 평활화 계수
-#define ALPHA_slow 0.001 // 평활화 계수
 
-    if (new_peak_dbfs > noise_floor_dbfs + threshold_dB) {
+	if (new_peak_dbfs > noise_floor_dbfs + threshold_dB) {
 		// 
 		// printf("new_peak_dbfs=%f,\t\tnew_rms=%f,\t\tnoise_floor_dbfs=%f,\t\t *p_noise_floor=%f state=", new_peak_dbfs, new_rms_dbfs, calculate_dbfs(*p_noise_floor), *p_noise_floor);
 		// printf("0\r\n");
@@ -1314,9 +944,9 @@ double update_noise_floor(double new_rms, double new_peak, double *p_noise_floor
 
 		return *p_noise_floor;
 		
-    }
+	}
 
-    if (new_rms_dbfs > noise_floor_dbfs) {
+	if (new_rms_dbfs > noise_floor_dbfs) {
 		// IIR 필터 적용
 		*p_noise_floor = (double)ALPHA_slow * new_rms + (1.0 - (double)ALPHA_slow) * (*p_noise_floor);
 		// printf("new_peak_dbfs=%f,\t\tnew_rms=%f,\t\tnoise_floor_dbfs=%f,\t\t *p_noise_floor=%f state=", new_peak_dbfs, new_rms_dbfs, calculate_dbfs(*p_noise_floor), *p_noise_floor);
@@ -1328,12 +958,12 @@ double update_noise_floor(double new_rms, double new_peak, double *p_noise_floor
 #endif		
 
 		return *p_noise_floor;
-    }
+	}
 
 	
 
-    // IIR 필터 적용
-    *p_noise_floor = (double)ALPHA_fast * new_rms + (1.0 - (double)ALPHA_fast) * (*p_noise_floor);
+	// IIR 필터 적용
+	*p_noise_floor = (double)ALPHA_fast * new_rms + (1.0 - (double)ALPHA_fast) * (*p_noise_floor);
 
 	if (calculate_dbfs(*p_noise_floor)<-90) {
 		*p_noise_floor = calculate_ratio(-90.0);
@@ -1346,20 +976,18 @@ double update_noise_floor(double new_rms, double new_peak, double *p_noise_floor
 	printf("state_n=2 ");
 #endif	
 
-    return *p_noise_floor;
+	return *p_noise_floor;
 }
 
 // 노이즈 플로어를 업데이트하는 함수
 double update_peak_max(double noisefloor_dB, double new_rms, double new_peak, double *p_peak_max, double threshold_dB) {
 
-    double peak_max_dbfs = calculate_dbfs(*p_peak_max);
-    double new_rms_dbfs = calculate_dbfs(new_rms);
+	double peak_max_dbfs = calculate_dbfs(*p_peak_max);
+	double new_rms_dbfs = calculate_dbfs(new_rms);
 	double new_peak_dbfs = calculate_dbfs(new_peak);
 
 	// printf("new_peak_dbfs=%.1f,\t\tnew_rms=%.1f,\t\tnoise_floor_dbfs=%.1f,\t\t new_peak_dbfs=%.1f threshold_dB=%.1f\r\n", new_peak_dbfs, new_rms_dbfs, noisefloor_dB, new_peak_dbfs, threshold_dB);
 
-#define ALPHA_fast2 0.5 // 평활화 계수
-#define ALPHA_slow2 0.00001 // 평활화 계수
 
 	if(new_rms_dbfs > noisefloor_dB + threshold_dB) {
 		if (new_peak_dbfs >= (peak_max_dbfs)) {
@@ -1385,8 +1013,8 @@ double update_peak_max(double noisefloor_dB, double new_rms, double new_peak, do
 #endif		
 		return *p_peak_max;
 	}
-    	
-    if ((new_rms_dbfs < noisefloor_dB + (threshold_dB / 4))) {
+		
+	if ((new_rms_dbfs < noisefloor_dB + (threshold_dB / 4))) {
 		// IIR 필터 적용
 		*p_peak_max = calculate_ratio(noisefloor_dB) ; //(double)ALPHA_fast2 * new_peak + (1.0 - (double)ALPHA_fast2) * *p_peak_max;
 		// *p_peak_max = ((double)ALPHA_slow2) * calculate_ratio(noisefloor_dB) + (1.0 - (double)ALPHA_slow2) * (*p_peak_max);
@@ -1394,7 +1022,7 @@ double update_peak_max(double noisefloor_dB, double new_rms, double new_peak, do
 		printf("state=3 ");
 #endif		
 		return *p_peak_max;
-    } else {
+	} else {
 		// IIR 필터 적용
 		*p_peak_max = ((double)ALPHA_fast2) * new_peak + (1.0 - (double)ALPHA_fast2) * (*p_peak_max);
 #ifdef PRINT_DEBUG_PEAKMAX		
@@ -1404,64 +1032,57 @@ double update_peak_max(double noisefloor_dB, double new_rms, double new_peak, do
 	}		
 }
 
-// dBFS 값을 계산하는 함수
-double calculate_dbfsfromPower(double power) {
-
-	if (power == 0.0) return -INFINITY;
-
-    return 10.0 * log10(power); // 16비트 오디오 최대값을 32768로 가정
-}
 
 // dBFS 값을 계산하는 함수
 double calculate_dbfs(double rms) {
 
 	if (rms == 0.0) return -INFINITY;
 
-    return 20.0 * log10(rms); // 16비트 오디오 최대값을 32768로 가정
+	return 20.0 * log10(rms); // 16비트 오디오 최대값을 32768로 가정
 }
 
 // ratio 값을 계산하는 함수
 double calculate_ratio(double dbfs) {
-    return pow(10.0, dbfs / 20.0); // 16비트 오디오 최대값을 32768로 가정
+	return pow(10.0, dbfs / 20.0); // 16비트 오디오 최대값을 32768로 가정
 }
 
 // 위상 차이를 계산하고 -180도에서 180도 사이로 조정하는 함수
 double phase_difference(double phase1, double phase2) {
-    double diff = phase1 - phase2;
+	double diff = phase1 - phase2;
 
-    // 차이를 -180도에서 180도 사이로 조정
-    while (diff > 180.0) {
-        diff -= 360.0;
-    }
-    while (diff <= -180.0) {
-        diff += 360.0;
-    }
+	// 차이를 -180도에서 180도 사이로 조정
+	while (diff > 180.0) {
+		diff -= 360.0;
+	}
+	while (diff <= -180.0) {
+		diff += 360.0;
+	}
 
-    return fabs(diff);
+	return fabs(diff);
 }
 
 double phase_average(double phases[], int n) {
-    double sum_sin = 0.0;
-    double sum_cos = 0.0;
+	double sum_sin = 0.0;
+	double sum_cos = 0.0;
 
-    // 위상을 각도로 변환하여 sin과 cos 값을 합산
-    for (int i = 0; i < n; i++) {
-        sum_sin += sin(phases[i] * M_PI / 180.0);
-        sum_cos += cos(phases[i] * M_PI / 180.0);
-    }
+	// 위상을 각도로 변환하여 sin과 cos 값을 합산
+	for (int i = 0; i < n; i++) {
+		sum_sin += sin(phases[i] * M_PI / 180.0);
+		sum_cos += cos(phases[i] * M_PI / 180.0);
+	}
 
-    // 평균 벡터의 각도를 구함
-    double avg_phase_rad = atan2(sum_sin, sum_cos);
+	// 평균 벡터의 각도를 구함
+	double avg_phase_rad = atan2(sum_sin, sum_cos);
 
-    // 라디안 값을 도 단위로 변환
-    double avg_phase_deg = avg_phase_rad * 180.0 / M_PI;
+	// 라디안 값을 도 단위로 변환
+	double avg_phase_deg = avg_phase_rad * 180.0 / M_PI;
 
-    // -180도에서 180도 사이로 값 조정
-    if (avg_phase_deg > 180.0) {
-        avg_phase_deg -= 360.0;
-    } else if (avg_phase_deg < -180.0) {
-        avg_phase_deg += 360.0;
-    }
+	// -180도에서 180도 사이로 값 조정
+	if (avg_phase_deg > 180.0) {
+		avg_phase_deg -= 360.0;
+	} else if (avg_phase_deg < -180.0) {
+		avg_phase_deg += 360.0;
+	}
 
-    return avg_phase_deg;
+	return avg_phase_deg;
 }

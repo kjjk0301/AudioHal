@@ -5,6 +5,7 @@
 #define LP_PASS_TAPS  9
 #define LP_PASS_TAPS3  15
 #define LP_PASS_TAPS6  31
+#define LP_PASS_TAPS128  128
 
 #define IN_BUFF_SIZE_RC  768*2
 #define In_BUFF_SIZE  682
@@ -17,8 +18,8 @@ typedef struct UpdamplerContext
     unsigned short  FilterOrder;
     unsigned short  CurrentBufferSz;
     unsigned short  MaxBufferSz;
-    double FilterWindow[LP_PASS_TAPS3];
-    double FilterCoef[LP_PASS_TAPS3];
+    double FilterWindow[LP_PASS_TAPS128];
+    double FilterCoef[LP_PASS_TAPS128];
 }UpdamplerContext;
 
 
@@ -31,6 +32,7 @@ void DestroyResampler(UpdamplerContext* pContext);
 extern double pLowPassFilter[LP_PASS_TAPS];
 extern double pLowPassFilter3[LP_PASS_TAPS3];
 extern double pLowPassFilter6[LP_PASS_TAPS6];
+extern double pLowPassFilter128[LP_PASS_TAPS128];
 
 
 

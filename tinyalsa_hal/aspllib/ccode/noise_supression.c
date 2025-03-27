@@ -14,27 +14,41 @@
 #include "sys.h"
 #include "noise_supression.h"
 #include "time_constant.h"
-#include "dB_scale.h"
+// #include "dB_scale.h"
 
 #include "debug_file.h"
 
-#pragma DATA_ALIGN(SEE, 8)
+// Global variables <- need to be included in structure
+/*
 int32_t SEE[PolyM];
-#pragma DATA_ALIGN(SBB, 8)
 int32_t SBB[PolyM];
-
-// #pragma DATA_ALIGN(HPRE2, 8)
-// int HPRE2[PolyM];
-#pragma DATA_ALIGN(H_MAIN, 8)
+int32_t See_oct[22];
+int32_t H_Q15_oct[22];
 int32_t H_MAIN[PolyM];
 int32_t Hmin[PolyM/2+1];
-nsInst_t Sys_nsInst;
+*/
+// Global variables <- need to be included in structure
 
 nsInst_t* sysNSCreate()
 {
-    NS_Init(&Sys_nsInst);
+    nsInst_t * nsInst_p = malloc(sizeof(nsInst_t));
+    NS_Init(nsInst_p);
 
-    return &Sys_nsInst;
+    return nsInst_p;
+}
+
+void NS_DeInit(void **nsInst){
+
+    // printf("NS_DeInit() start *inst=%p\r\n", *nsInst);
+    nsInst_t *inst = (nsInst_t *)*nsInst;
+    if(inst) {
+        free(inst);
+        *nsInst = NULL;
+        // printf("NS_DeInit() end *inst=%p\r\n", *nsInst);
+    }
+// #ifdef DEBUG_NS_MATLAB
+// 	debug_matlab_close();
+// #endif	
 }
 
 void NS_Init(void *nsInst){
@@ -79,12 +93,16 @@ void NS_Init(void *nsInst){
         // printf("    time_constant=%.2f msec, beta_e[k]=%d, round_bit_e[k]=%d, gamma_inv_e[k]=%d \r\n",tau_msec[inst->beta_e_num[k]], inst->beta_e[k], inst->round_bit_e[k], inst->gamma_inv_e[k]);
     }
 
+    memset(inst->beta_r_num, 0, sizeof(inst->beta_r_num));
     inst->beta_r_num[0]=6;
+    inst->beta_r_num[1]=6;
     inst->beta_r_num[2]=15;
     inst->beta_r_num[3]=6;
+    inst->beta_r_num[4]=6;
     inst->beta_r_num[5]=15;
     inst->beta_r_num[6]=6;
-    inst->beta_r_num[8]=15;            
+    inst->beta_r_num[7]=6;
+    inst->beta_r_num[8]=15;         
 
     for (k=0; k<9; k++){
         inst->beta_r[k]=beta[inst->beta_r_num[k]];
@@ -93,11 +111,11 @@ void NS_Init(void *nsInst){
         // printf("    time_constant=%.2f msec, beta_r[k]=%d, round_bit_r[k]=%d, gamma_inv_r[k]=%d \r\n",tau_msec[inst->beta_r_num[k]], inst->beta_r[k], inst->round_bit_r[k], inst->gamma_inv_r[k]);
     }    
 
-    inst->See_p=SEE;
-    inst->Sbb_p=SBB;
+    inst->See_p=inst->SEE;
+    inst->Sbb_p=inst->SBB;
 
-    inst->H_p = H_MAIN;
-	inst->HminQ15_p = Hmin;
+    inst->H_p = inst->H_MAIN;
+	inst->HminQ15_p = inst->Hmin;
 	inst->betaQ15=(int32_t)(0.4*32767.0);
 
     inst->beta_low_ratio = 2.0;
@@ -138,31 +156,12 @@ void NS_Init(void *nsInst){
         // printf("%2.1fdB, %d, ", 20.0*log10((float)(inst->HminQ15_p)[k]/(float)Q15_val), (inst->HminQ15_p)[k]);  
     }
 
-
-    // for (k=0 ; k<=inst->voice_end_bin; k++){
-    //     (inst->HminQ15_p)[k] = (int32_t)(powf(10,((((inst->max_att-inst->min_att)*(inst->slope))/((float)k+inst->slope)+inst->min_att)/20))*(float)Q15_val);
-    //     printf("    Hmin[%d] = %f dB, HminQ15 = %d\r\n", k, 20.0*log10((float)(inst->HminQ15_p)[k]/(float)Q15_val), (inst->HminQ15_p)[k]);
-    // }
-
-    // for (k=inst->voice_end_bin+1 ; k<PolyM/2+1; k++){
-    //     (inst->HminQ15_p)[k] = (int32_t)(powf(10,((((inst->max_att-inst->min_att)*(inst->slope))/((float)(k)+inst->slope)+inst->min_att+((inst->high_att-inst->min_att)*(inst->slope))/((float)(PolyM/2+1- k) *0.5+inst->slope*0.5))/20))*(float)Q15_val);
-    //     // (inst->HminQ15_p)[k] = (int32_t)(powf(10,((((inst->max_att-inst->min_att)*(inst->slope))/((float)k+inst->slope)+inst->min_att+inst->high_att)/20))*(float)Q15_val);
-    //     printf("    Hmin[%d] = %f dB, HminQ15 = %d\r\n", k, 20.0*log10((float)(inst->HminQ15_p)[k]/(float)Q15_val), (inst->HminQ15_p)[k]);
-    // }
-
-    memset(&fft_ns_buf_mat[0], 0, sizeof(int32_t)*(PolyM*(PolyL+Ma_size_max-1))); 	
+    // memset(&fft_ns_buf_mat[0], 0, sizeof(int32_t)*(PolyM*(PolyL+Ma_size_max-1))); 	// need to be moved to asplnr.c
 
 // #ifdef DEBUG_NS_MATLAB
 // 	debug_matlab_open();
 // #endif	
 
-}
-
-void NS_DeInit(){
-
-// #ifdef DEBUG_NS_MATLAB
-// 	debug_matlab_close();
-// #endif	
 }
 
 void NS_process(void *nsInst, void *fft_in_mat, void *fft_buf_mat, void *fft_out_mat, int vad){
@@ -187,11 +186,6 @@ void NS_process(void *nsInst, void *fft_in_mat, void *fft_buf_mat, void *fft_out
 
     int32_t *H_Q15 = inst->H_p;
 
-    // float r_a = 0.995;
-	// float r_r = 0.995;
-    // float r_a = 0.001;
-    // float r_r = 0.005;
-
     int buf_len = PolyL + inst->Ma_size+2 -1;
     float deno = 1.0/((float)inst->Ma_size);
     float deno2 = 1.0/((float)(inst->Ma_size)+2.0);
@@ -206,7 +200,6 @@ void NS_process(void *nsInst, void *fft_in_mat, void *fft_buf_mat, void *fft_out
         }
         kk+=(PolyL+Ma_size_max-1);
     }
-
 
     for (m=0 ; m<PolyL ; m++){
         // Power estimation
@@ -316,11 +309,6 @@ void NS_process(void *nsInst, void *fft_in_mat, void *fft_buf_mat, void *fft_out
                 }
             }
         }
-
-
-
-
-
 
         // estimate Sbb
         if (vad<=0){
@@ -445,8 +433,6 @@ void NS_process(void *nsInst, void *fft_in_mat, void *fft_buf_mat, void *fft_out
             }
         }
 
-
-
 		H_Q15[0]=0;
 		H_Q15[PolyM/2]=0;
 
@@ -515,9 +501,6 @@ if (g_ns_debug_on==1){
 #endif    
 }
 
-    int32_t See_oct[22];
-    int32_t H_Q15_oct[22];
-
 void NS_oct_process(void *nsInst, void *fft_in_mat, void *fft_buf_mat, void *fft_out_mat, int vad){
 
 	int32_t pow_inst[PolyM/2+1];
@@ -557,7 +540,6 @@ void NS_oct_process(void *nsInst, void *fft_in_mat, void *fft_buf_mat, void *fft
         }
         kk+=(PolyL+Ma_size_max-1);
     }
-
 
     for (m=0 ; m<PolyL ; m++){
         // Power estimation
@@ -660,26 +642,26 @@ void NS_oct_process(void *nsInst, void *fft_in_mat, void *fft_buf_mat, void *fft
             }
         }
 
-        See_oct[0] = 0;
-        calculate_third_octave_spectrum(&See[0], &See_oct[1]);
+        inst->See_oct[0] = 0;
+        calculate_third_octave_spectrum(&See[0], &(inst->See_oct[1]));
 
         // estimate Sbb
         // if (vad<=0){
 
             // frequency axis smoothing
-            // bb[0]=See_oct[0];
+            // bb[0]=inst->See_oct[0];
 
             // for (k=1; k<freq_count-1; k++){
             //     // bb[k]=See[k]-((See[k]+(inst->round_bit_freq))>>(inst->beta_freq));
             //     // bb[k]=bb[k]+((bb[k-1]+(inst->round_bit_freq))>>(inst->beta_freq));
-            //     bb[k] = (int32_t)(0.5 * (double)(bb[k-1]) + (1-0.5) * (double)(See_oct[k]));  
+            //     bb[k] = (int32_t)(0.5 * (double)(bb[k-1]) + (1-0.5) * (double)(inst->See_oct[k]));  
             // }
 
 
             // for (k = freq_count-2; k>=0 ; k--){
             //     // bb[k]=bb[k]-((bb[k]+(inst->round_bit_freq))>>(inst->beta_freq));
             //     // bb[k]=bb[k]+((bb[k+1]+(inst->round_bit_freq))>>(inst->beta_freq));
-            //     bb[k] = (int32_t)(0.5 * (double)(bb[k+1]) + (1-0.5) * (double)(See_oct[k])); 
+            //     bb[k] = (int32_t)(0.5 * (double)(bb[k+1]) + (1-0.5) * (double)(inst->See_oct[k])); 
             // }
             for(size_t i = 1; i < freq_count; i++) {
                 float start_freq = third_octave_freqs[i-1];
@@ -690,17 +672,17 @@ void NS_oct_process(void *nsInst, void *fft_in_mat, void *fft_buf_mat, void *fft
                 int32_t sum = 0;
                 float beta = 0;
                 if (end_idx<inst->voice_start_bin){
-                    if (See_oct[i]>Sbb[i]) {
+                    if (inst->See_oct[i]>Sbb[i]) {
                     // if (vad==0){
                         // Sbb[k] = (int32_t)(0.0183 * (double)(Sbb[k]) + (1-0.0183) * (double)(bb[k]));  
                         if (inst->gamma_inv_r[6]==0) {
-                            temp=See_oct[i]-((See_oct[i]+(inst->round_bit_r[6]))>>(inst->beta_r[6]));
+                            temp=inst->See_oct[i]-((inst->See_oct[i]+(inst->round_bit_r[6]))>>(inst->beta_r[6]));
                             Sbb[i]=temp+((Sbb[i]+(inst->round_bit_r[6]))>>(inst->beta_r[6]));
                         } else {
                             beta_r=inst->beta_r[6];
                             round_bit_r=(inst->round_bit_r[6]);
                             Sbb[i]=Sbb[i]-((Sbb[i]+round_bit_r)>>beta_r);
-                            Sbb[i]=Sbb[i]+((See_oct[i]+round_bit_r)>>beta_r);
+                            Sbb[i]=Sbb[i]+((inst->See_oct[i]+round_bit_r)>>beta_r);
                         }
                     // } 
                     }
@@ -708,70 +690,70 @@ void NS_oct_process(void *nsInst, void *fft_in_mat, void *fft_buf_mat, void *fft
                     // if (vad==0){
                         // Sbb[i] = (int32_t)(0.9608 * (double)(Sbb[i]) + (1-0.9608) * (double)(bb[i])); 
                         if (inst->gamma_inv_r[8]==0) {
-                            temp=See_oct[i]-((See_oct[i]+(inst->round_bit_r[8]))>>(inst->beta_r[8]));
+                            temp=inst->See_oct[i]-((inst->See_oct[i]+(inst->round_bit_r[8]))>>(inst->beta_r[8]));
                             Sbb[i]=temp+((Sbb[i]+(inst->round_bit_r[8]))>>(inst->beta_r[8]));
                         } else {
                             beta_r=inst->beta_r[8];
                             round_bit_r=(inst->round_bit_r[8]);
                             Sbb[i]=Sbb[i]-((Sbb[i]+round_bit_r)>>beta_r);
-                            Sbb[i]=Sbb[i]+((See_oct[i]+round_bit_r)>>beta_r);
+                            Sbb[i]=Sbb[i]+((inst->See_oct[i]+round_bit_r)>>beta_r);
                         }
                     // }
                     }
                 } else if (end_idx<=inst->voice_end_bin){
                     if (vad<=0){
-                        if (See_oct[i]>Sbb[i]) {
+                        if (inst->See_oct[i]>Sbb[i]) {
                         // if (vad==0){
                             if (inst->gamma_inv_r[3]==0) {
-                                temp=See_oct[i]-((See_oct[i]+(inst->round_bit_r[3]))>>(inst->beta_r[3]));
+                                temp=inst->See_oct[i]-((inst->See_oct[i]+(inst->round_bit_r[3]))>>(inst->beta_r[3]));
                                 Sbb[i]=temp+((Sbb[i]+(inst->round_bit_r[3]))>>(inst->beta_r[3]));
                             } else {
                                 beta_r=inst->beta_r[3];
                                 round_bit_r=(inst->round_bit_r[3]);
                                 Sbb[i]=Sbb[i]-((Sbb[i]+round_bit_r)>>beta_r);
-                                Sbb[i]=Sbb[i]+((See_oct[i]+round_bit_r)>>beta_r);
+                                Sbb[i]=Sbb[i]+((inst->See_oct[i]+round_bit_r)>>beta_r);
                             }
                         // }
                         }
                         else {
                         // if (vad==0){
                             if (inst->gamma_inv_r[5]==0) {
-                                temp=See_oct[i]-((See_oct[i]+(inst->round_bit_r[5]))>>(inst->beta_r[5]));
+                                temp=inst->See_oct[i]-((inst->See_oct[i]+(inst->round_bit_r[5]))>>(inst->beta_r[5]));
                                 Sbb[i]=temp+((Sbb[i]+(inst->round_bit_r[5]))>>(inst->beta_r[5]));
                             } else {
                                 beta_r=inst->beta_r[5];
                                 round_bit_r=(inst->round_bit_r[5]);
                                 Sbb[i]=Sbb[i]-((Sbb[i]+round_bit_r)>>beta_r);
-                                Sbb[i]=Sbb[i]+((See_oct[i]+round_bit_r)>>beta_r);
+                                Sbb[i]=Sbb[i]+((inst->See_oct[i]+round_bit_r)>>beta_r);
                             }
                         // }
                         }
                     }
                 } else {
                     if (vad<=0){
-                        if (See_oct[i]>Sbb[i]) {
+                        if (inst->See_oct[i]>Sbb[i]) {
                         // if (vad==0){
                             if (inst->gamma_inv_r[0]==0) {
-                                temp=See_oct[i]-((See_oct[i]+(inst->round_bit_r[0]))>>(inst->beta_r[0]));
+                                temp=inst->See_oct[i]-((inst->See_oct[i]+(inst->round_bit_r[0]))>>(inst->beta_r[0]));
                                 Sbb[i]=temp+((Sbb[i]+(inst->round_bit_r[0]))>>(inst->beta_r[0]));
                             } else {
                                 beta_r=inst->beta_r[0];
                                 round_bit_r=(inst->round_bit_r[0]);
                                 Sbb[i]=Sbb[i]-((Sbb[i]+round_bit_r)>>beta_r);
-                                Sbb[i]=Sbb[i]+((See_oct[i]+round_bit_r)>>beta_r);
+                                Sbb[i]=Sbb[i]+((inst->See_oct[i]+round_bit_r)>>beta_r);
                             }
                         // }
                         }
                         else {
                         // if (vad==0){
                             if (inst->gamma_inv_r[2]==0) {
-                                temp=See_oct[i]-((See_oct[i]+(inst->round_bit_r[2]))>>(inst->beta_r[2]));
+                                temp=inst->See_oct[i]-((inst->See_oct[i]+(inst->round_bit_r[2]))>>(inst->beta_r[2]));
                                 Sbb[i]=temp+((Sbb[i]+(inst->round_bit_r[2]))>>(inst->beta_r[2]));
                             } else {
                                 beta_r=inst->beta_r[2];
                                 round_bit_r=(inst->round_bit_r[2]);
                                 Sbb[i]=Sbb[i]-((Sbb[i]+round_bit_r)>>beta_r);
-                                Sbb[i]=Sbb[i]+((See_oct[i]+round_bit_r)>>beta_r);
+                                Sbb[i]=Sbb[i]+((inst->See_oct[i]+round_bit_r)>>beta_r);
                             }
                         // }
                         }
@@ -779,8 +761,8 @@ void NS_oct_process(void *nsInst, void *fft_in_mat, void *fft_buf_mat, void *fft
                 }
             }         
 
-		H_Q15_oct[0]=0;
-		H_Q15_oct[freq_count-2]=0;
+		inst->H_Q15_oct[0]=0;
+		inst->H_Q15_oct[freq_count-2]=0;
 
 		H_Q15[0]=0;
 		H_Q15[PolyM/2]=0;
@@ -802,7 +784,7 @@ void NS_oct_process(void *nsInst, void *fft_in_mat, void *fft_buf_mat, void *fft
                 beta=beta_high;
             }
     
-            Htemp_Q15[i]=(int32_t)(((float)Sbb[i]/((float)See_oct[i]+0.1))*32768.0);
+            Htemp_Q15[i]=(int32_t)(((float)Sbb[i]/((float)(inst->See_oct[i])+0.1))*32768.0);
             Htemp_Q15[i]=32767-(int32_t)((float)Htemp_Q15[i]*beta/((float)H_Q15[start_idx]+0.1));
 
             for(int j = start_idx; j < end_idx; j++) {
@@ -851,7 +833,7 @@ void NS_oct_process(void *nsInst, void *fft_in_mat, void *fft_buf_mat, void *fft
 	if ((g_ns_debug_on==1)&&(g_ns_debug_snd_idx==0)){           
 
         // debug_matlab_spectrum_oct_int(See, 0, 128);
-        debug_matlab_spectrum_int(See_oct, 0, 21);
+        debug_matlab_spectrum_int(inst->See_oct, 0, 21);
         // debug_matlab_spectrum_oct_int(Sbb, 1, 128);
         // debug_matlab_spectrum_int(Sbb, 1, 21);
 
@@ -866,7 +848,7 @@ void NS_oct_process(void *nsInst, void *fft_in_mat, void *fft_buf_mat, void *fft
             int end_idx = (end_freq / (16000 / 2)) * (256 / 2);
 
 
-            temp_out[i] = ((See_oct[i]>>7)*(H_Q15[start_idx]>>8));
+            temp_out[i] = ((inst->See_oct[i]>>7)*(H_Q15[start_idx]>>8));
         }        
 
         debug_matlab_spectrum_int(temp_out, 1, 21);

@@ -11,9 +11,9 @@
   * All rights reserved.</center></h2>
   ******************************************************************************
   *
-  * version : 0.1.0
-  * release date : 2024.11.19
-  * release info : MarkT aec first release
+  * version : 1.4.0
+  * release date : 2024.12.11
+  * release info : refactoring for multi instance usage. for now, 1 channel NR only
   *
   ******************************************************************************
   */ 
@@ -51,6 +51,18 @@ typedef struct aspl_NR_CONFIG_
   int SNR_current;
 
   void * Total_Inst_p;
+  // void * aecInst_p;
+
+  // int offset_Q15_L;
+  // int offset_Q15_R;
+
+  // float AEC_filter_save[2000];
+  // int AEC_filter_len;
+  // int AEC_globaldelay1024; // for 1024 buffer
+  // int AEC_globaldelay1600; // for 1600 buffer
+  // int AEC_filter_updated;
+  // int AEC_filter_loaded;  
+
   void * aecInst_p[4];
 
   int aec_Mic_N;
@@ -169,21 +181,21 @@ typedef struct aspl_nr_params_s {
 
 extern aspl_nr_params_t g_aspl_nr_params;
 
-int aspl_NR_create(void* data); // 1mic용 NR 초기화 함수
-int aspl_NR_process(short* data, int len); // 1mic용 NR 수행 함수
-int aspl_NR_process_enables(short* data, int len, int NS_enable, int AGC_enable, int globalgain_dB); // 1mic용 NR 수행 함수 with NS, AGC enable control and glabal gain control(dB) 
-int aspl_NR_destroy(void); // NR 제거 함수
-int aspl_NR_set(aspl_NR_CMD_E cmd, void* data); // NR단계 적용 함수
+void aspl_print_ver();
+const char* aspl_getVersionInfo();
 
-void aspl_NR_expert_param_read(aspl_nr_params_t* tmp_p);
-void aspl_NR_expert_param_write(aspl_nr_params_t* tmp_p);
-int aspl_NR_param_set(int param_num, int value); // expert mode, NR 파라메터 변경
-int aspl_NR_param_get(int param_num); // expert mode, NR 파라메터 읽기
-int aspl_NR_total_param_set_from_file(const char* file_path); // expert mode, 튜닝 파라메터 바이너리 파일로 부터 파라메터 전체 업데이트
-int aspl_NR_total_param_write_to_file(const char* file_path); // expert mode, 전체 튜닝 파라메터를 바이너리 파일로 기록 
+int aspl_NR_param_set(int param_num, int value, aspl_NR_CONFIG* config); // expert mode, NR 파라메터 변경
+int aspl_NR_param_get(int param_num, aspl_NR_CONFIG* config); // expert mode, NR 파라메터 읽기
+int aspl_NR_total_param_set_from_file(const char* file_path, aspl_NR_CONFIG* config); // expert mode, 튜닝 파라메터 바이너리 파일로 부터 파라메터 전체 업데이트
+int aspl_NR_total_param_write_to_file(const char* file_path, aspl_NR_CONFIG* config); // expert mode, 전체 튜닝 파라메터를 바이너리 파일로 기록 
+int aspl_NR_apply_profile_param(const char* file_path, int profile_num, aspl_NR_CONFIG* config); // pre-defined profile paramter binary 불러와서 적용
+int aspl_NR_set(aspl_NR_CMD_E cmd, aspl_NR_CONFIG* config); // NR단계 적용 함수
 
-int aspl_NR_create_2mic(void* data); // 2mic NR 초기화 함수
-// int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double * pDoA); // 2mic NR 수행 함수, with Beamforming auto mode : 1 auto, 0 manual
+int aspl_NR_destroy(aspl_NR_CONFIG* config); // NR 제거 함수
+int aspl_NR_create(aspl_NR_CONFIG* config); // 1mic용 NR 초기화 함수
+int aspl_NR_create_2mic(aspl_NR_CONFIG* config);
+int aspl_NR_process(short* data, int len, aspl_NR_CONFIG* config); // 1mic용 NR 수행 함수
+int aspl_NR_process_enables(short* data, int len, int NS_enable, int AGC_enable, int globalgain_dB, aspl_NR_CONFIG* config); // 1mic용 NR 수행 함수 with NS, AGC enable control and glabal gain control(dB) 
 int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double * pDoA, aspl_NR_CONFIG* config);
 
 int aspl_AEC_create(aspl_NR_CONFIG* config);
@@ -192,7 +204,7 @@ int aspl_AEC_process_single(int16_t* data, int16_t* ref, int len, int aec_delay,
 int aspl_AEC_process_filtersave(int16_t* data, int16_t* ref, int len, int aec_delay, int delayauto, float micscaledB, aspl_NR_CONFIG* config);
 int aspl_AEC_filterload(aspl_NR_CONFIG* config);
 
-void aspl_print_ver();
-const char* aspl_getVersionInfo();
+int aspl_cgn_process_single(int16_t* data, int len, float noisedBFS, aspl_NR_CONFIG* config);
 
 #endif
+

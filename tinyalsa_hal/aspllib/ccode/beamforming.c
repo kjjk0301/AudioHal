@@ -24,10 +24,10 @@ int xref_bf_pow[BeamN][PolyM];
 int err_bf_pow[BeamN][PolyM];
 
 
-bfInst_t* sysBFCreate()
+bfInst_t* sysBFCreate(Total_Inst_t *Total_Inst_p)
 {
 	int i, j;
-    BF_Init(&Sys_bfInst, &fft_in_mat[0][0], &fft_bf_mat[0][0], &fft_bf_rear_mat[0][0]);
+    BF_Init(&Sys_bfInst, Total_Inst_p);
 	for (j=0; j<BeamN; j++){
 		for (i=0; i<PolyM; i++){	
 		    BF_delay_init(&Sys_bfInst, &bf_d_buf_g[j][i][0], adaptive_BF_delay+1);	
@@ -38,7 +38,7 @@ bfInst_t* sysBFCreate()
     return &Sys_bfInst;
 }
 
-void BF_Init(bfInst_t *bfInst, void *fft_xin_mat, void *fft_xout_mat, void *fft_xout_rear_mat)
+void BF_Init(bfInst_t *bfInst, Total_Inst_t *Total_Inst_p)
 {
 
 	int m,n;
@@ -60,26 +60,29 @@ void BF_Init(bfInst_t *bfInst, void *fft_xin_mat, void *fft_xout_mat, void *fft_
 	for (m=0 ; m<MicN ; m++){
 //			tempPtr=tempPtr + m*PolyM*PolyL*4;
 //			inst->fft_bfin_mat[m]= (int32_t *)tempPtr;
-		inst->fft_bfin_mat[m]=&fft_in_mat[m][0];
+		// inst->fft_bfin_mat[m]=&fft_in_mat[m][0];
+        inst->fft_bfin_mat[m]=Total_Inst_p->fft_in_mat[m];
 	}
 
 //		tempPtr = (unsigned char *)fft_xout_mat;
 	for (m=0 ; m<BeamN ; m++){
-		inst->fft_bfout_mat[m]=&fft_bf_mat[m][0];
+		// inst->fft_bfout_mat[m]=&fft_bf_mat[m][0];
+        inst->fft_bfout_mat[m]=Total_Inst_p->fft_bf_mat[m];
 
 	}
 
-	for (m=0 ; m<BeamN ; m++){
-		for (n=0 ; n<(PolyM*PolyL*2) ; n++){
-            fft_bf_mat[m][n];
-            fft_bf_rear_mat[m][n];
-        }
-	}
+	// for (m=0 ; m<BeamN ; m++){
+	// 	for (n=0 ; n<(PolyM*PolyL*2) ; n++){
+    //         fft_bf_mat[m][n];
+    //         fft_bf_rear_mat[m][n];
+    //     }
+	// }
     
 
 //		tempPtr = (unsigned char *)fft_xout_rear_mat;
 	for (m=0 ; m<BeamN ; m++){
-		inst->fft_bfout_rear_mat[m]=&fft_bf_rear_mat[m][0];
+		// inst->fft_bfout_rear_mat[m]=&fft_bf_rear_mat[m][0];
+        inst->fft_bfout_rear_mat[m]=Total_Inst_p->fft_bf_rear_mat[m];
 
 	}
 

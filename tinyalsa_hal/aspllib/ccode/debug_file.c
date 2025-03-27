@@ -136,7 +136,7 @@ int debug_matlab_open(){
 	g_agc_debug_snd_period = (int)(0.2 * (16000.0) / 512.0);
 	g_ns_debug_snd_period = (int)(0.2 * (16000.0) / 512.0);
 	g_ssl_debug_snd_period = (int)(0.5 * (16000.0) / (256.0/4));
-	g_aec_debug_snd_period = (int)(0.2 * (16000.0) / 1600.0);
+	g_aec_debug_snd_period = (int)(0.5 * (16000.0) / 512.0);
 
     // Setup TCP/IP client
     client_socket = socket(AF_INET, SOCK_STREAM, 0);

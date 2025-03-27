@@ -43,8 +43,8 @@ typedef struct bfInst_s {
 	
 } bfInst_t;
 
-bfInst_t* sysBFCreate();
-void BF_Init(bfInst_t *bfInst, void *fft_xin_mat, void *fft_xout_mat, void *fft_xout_rear_mat);
+bfInst_t* sysBFCreate(Total_Inst_t *Total_Inst_p);
+void BF_Init(bfInst_t *bfInst, Total_Inst_t *Total_Inst_p);
 void BF_process(bfInst_t *bfInst);
 void BF_process_rear(bfInst_t *bfInst);
 void BF_delay(bfInst_t *bfInst, int32_t *inBuf, int32_t *outBuf, int32_t *d_Buf, int delay);
