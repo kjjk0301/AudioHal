@@ -23,9 +23,9 @@
 #include "aspl_nr.h"
 
 // Define version information
-#define LIBRARY_VERSION "0.5.6"
-#define RELEASE_DATE "2025-03-25"
-#define RELEASE_STATUS "MarkT renewal multi instance"
+#define LIBRARY_VERSION "0.5.7"
+#define RELEASE_DATE "2025-04-09"
+#define RELEASE_STATUS "fix ssl DoA result mismatch"
 
 void aspl_NR_expert_param_read(aspl_nr_params_t* tmp_p, aspl_NR_CONFIG* config);
 void aspl_NR_expert_param_write(aspl_nr_params_t* tmp_p, aspl_NR_CONFIG* config);
@@ -1587,6 +1587,9 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
     for (j=0; j<j_max; j++){
 
         ///////////////////////////   DC rejection         ////////////////////////////////////////
+
+        AGC_input_2ch(agcInstp, NUM_FRAMES, &inputbuf[0][j*NUM_FRAMES], &inputbuf[1][j*NUM_FRAMES], &inputbuf[0][j*NUM_FRAMES], &inputbuf[1][j*NUM_FRAMES], agcInstp->globalMakeupGain_dB, agcInstp->threshold_dBFS);          
+
         if (Total_Inst_p->DC_rej_enable==1) {
             for (k=0; k<IN_CHANNELS_2MIC; k++){
                 for (i = 0; i < NUM_FRAMES; i++) {
@@ -1617,7 +1620,7 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
 
         k=0;
         for (m = ssl_blocksize/2 ; m<(NUM_FRAMES-ssl_blocksize) ; m=m+ssl_blocksize/2){
-            ssl_core_process_2ch((sslInst_t*) sslInstp, &vad_input[0][m], &vad_input[1][m], &Total_Inst_p->DoA_mean, mode_normal, vad_sum);
+            ssl_core_process_2ch((sslInst_t*) sslInstp, &vad_input[1][m], &vad_input[0][m], &Total_Inst_p->DoA_mean, mode_normal, vad_sum);
             k++;
 
             if ((Total_Inst_p->DoA_mean != -1)){
@@ -1723,11 +1726,11 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
             
         }    
 
-        outframe_p = &inputbuf[0][j*NUM_FRAMES];
-        refframe_p = (void*)work_buf[0];
-        if (Total_Inst_p->AGC_enable==1){
-            AGC_total_w_ref(agcInstp, outframe_p, refframe_p, outframe_p,   (Total_Inst_p->vad_min[0]+(Total_Inst_p->vad_min[1]<<1)), Total_Inst_p->vad_max[0]+Total_Inst_p->vad_max[1]);
-        }
+        // outframe_p = &inputbuf[0][j*NUM_FRAMES];
+        // refframe_p = (void*)work_buf[0];
+        // if (Total_Inst_p->AGC_enable==1){
+        //     AGC_total_w_ref(agcInstp, outframe_p, refframe_p, outframe_p,   (Total_Inst_p->vad_min[0]+(Total_Inst_p->vad_min[1]<<1)), Total_Inst_p->vad_max[0]+Total_Inst_p->vad_max[1]);
+        // }
 
         int temp;
         outframe_p = &inputbuf[0][j*NUM_FRAMES];

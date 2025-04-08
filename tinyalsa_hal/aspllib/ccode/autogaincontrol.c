@@ -706,6 +706,136 @@ void AGC_input_5ch_2(agcInst_t *agcInst, int leng, void *in1, void *in2, void *i
 }
 
 
+void AGC_input_2ch(agcInst_t *agcInst, int leng, void *in1, void *in2, void *out, void *out2, float globalMakeupGain_dB, float threshold_dBFS) {
+
+    int m;
+    float gmod, temp_gain;
+
+    agcInst_t *inst = (agcInst_t *)agcInst;
+
+    float xdB;
+    int abs_x1_Q15, abs_x2_Q15, abs_x3_Q15, abs_x4_Q15, abs_x5_Q15;
+    int max_x1_Q15, max_x2_Q15, max_x3_Q15, max_x4_Q15, max_x5_Q15;	
+    int abs_x_Q15, abs_xout_Q15, beta_f, roundbit_f, beta_p, roundbit_p;
+
+    short *xin = (short *)in1;
+    short *xin2 = (short *)in2;
+
+    short *xout = (short *)out;
+    short *xout2 = (short *)out2;
+
+
+	float gs = 20.0*log10f((float)inst->inputgain);	
+    float r_a = gamma16k[1];  // Attack time constant
+    float r_r = gamma16k[7]; // Release time constant
+
+	float threshold_dB = Q30_dB + threshold_dBFS;
+    float softClipStart = threshold_dB - 3.0f; // 쓰레숄드 3dB 전부터 소프트 클리핑 시작
+
+    max_x1_Q15 = 0;
+    max_x2_Q15 = 0;
+
+    for (m = 0 ; m < leng ; m++) {
+        // 각 채널의 절대값 최대값을 계산
+        abs_x1_Q15 = ((int)(abs(xin[m]))) << 15;
+        abs_x2_Q15 = ((int)(abs(xin2[m]))) << 15;
+
+        if (abs_x1_Q15 > max_x1_Q15) max_x1_Q15 = abs_x1_Q15;
+        if (abs_x2_Q15 > max_x2_Q15) max_x2_Q15 = abs_x2_Q15;
+    }
+
+    // 5개의 채널 최대값을 평균하여 x_fast 계산
+	inst->x_fast = (max_x1_Q15 + max_x2_Q15 ) / 2;
+
+
+    for (m = 0 ; m < leng ; m++) {
+
+        if (inst->x_fast > inst->x_peak) {        
+            inst->x_peak = inst->x_fast;
+        } else {
+            beta_p = beta16k[7];
+            roundbit_p = round_bit16k[7];        
+            inst->x_peak = inst->x_peak - ((inst->x_peak + roundbit_p) >> beta_p);
+            inst->x_peak = inst->x_peak + ((inst->x_fast + roundbit_p) >> beta_p);                
+        }           
+
+        xdB = 20.0f * log10f((float)inst->x_peak);
+
+        if (xdB > threshold_dB) {                
+            inst->gc = threshold_dB - xdB + globalMakeupGain_dB; 
+        } else if (xdB > softClipStart) {
+            // 서서히 게인을 줄이는 부분
+            float delta = (threshold_dB - xdB) / 3.0f;
+            inst->gc = delta + globalMakeupGain_dB; 
+        } else {
+            inst->gc = globalMakeupGain_dB;
+        }
+
+        inst->gc = MIN(inst->gc, globalMakeupGain_dB);
+        inst->gc = MAX(inst->gc, -100);
+
+        if (inst->gc < gs) {
+            gs = r_a * gs + (1.0 - r_a) * inst->gc;
+        } else {
+            gs = r_r * gs + (1.0 - r_r) * inst->gc;
+        }
+
+        inst->inputgain = powf(10, gs * 0.05f);
+
+        temp_gain = inst->inputgain;
+        xout[m] = (short)((float)xin[m] * temp_gain);
+        xout2[m] = (short)((float)xin2[m] * temp_gain);
+
+        abs_xout_Q15 = ((int)(abs(xout[m]))) << 15;
+
+        if (abs_xout_Q15 > inst->xout_fast) {            
+            beta_f = inst->beta_f_r;
+            roundbit_f = inst->round_bit_f_r;
+        } else {
+            beta_f = inst->beta_f_f;
+            roundbit_f = inst->round_bit_f_f;
+        }
+        inst->xout_fast = inst->xout_fast - ((inst->xout_fast + roundbit_f) >> beta_f);
+        inst->xout_fast = inst->xout_fast + ((abs_xout_Q15 + roundbit_f) >> beta_f);
+
+#ifdef DEBUG_AGC_MATLAB
+		if ((g_agc_debug_on == 1) && (g_agc_debug_snd_idx == 0)){            
+			inst->idx--;
+			if (inst->idx <= 0){
+				debug_matlab_int(DEBUG_NUM_AGC, inst->x_fast, 0);
+				debug_matlab_int(DEBUG_NUM_AGC, inst->x_peak, 1);
+				
+				debug_matlab_float(DEBUG_NUM_AGC, threshold_dB, 2);
+				debug_matlab_float(DEBUG_NUM_AGC, inst->gc, 3);
+				debug_matlab_float(DEBUG_NUM_AGC, gs, 4);
+
+				debug_matlab_int(DEBUG_NUM_AGC, inst->xout_fast, 7);
+
+				debug_matlab_send(DEBUG_NUM_AGC);
+				inst->idx = 32;
+			}
+		}
+
+		if (g_agc_debug_on == 1){
+			g_agc_debug_snd_idx++;
+			if (g_agc_debug_snd_idx >= g_agc_debug_snd_period) {
+				g_agc_debug_snd_idx = 0;
+			}
+		}
+
+#endif
+
+    }
+
+	// idx--;
+	// if (idx<=0){
+	// 	printf("AGC : x_peak = %d, inst->Kp_dB = %3.1f, xdB = %3.1f, gc=%.2f, gs=%.2f gain=%.2f\n", x_peak, threshold_dB-180, xdB-180, gc, gs, inputgain);
+	// 	idx=20;
+	// }		
+}
+
+
+
 void AGC_band(agcInst_t *agcInst, void *fft_in_mat, void *fft_out_mat) {
 
 	int k, m, n;
