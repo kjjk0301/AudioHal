@@ -18,6 +18,8 @@
 #include "effects.h"
 #include "aspl_nr.h"
 #include "Resample.h"
+#include "parsesetting.h"
+
 #include <speex/speex_echo.h>
 
 
@@ -126,25 +128,27 @@ short TempResample[768*5];
 short workbuf[768*4];
 
 aspl_NR_CONFIG aspl_nr_config;
-SpeexEchoState *st;
+Settings settings = {0};
+
+//	SpeexEchoState *st;
 
 
 #define NN 256
 #define TAIL 1024
 
 
-#if 1
-#include <time.h>
-
-#define MAX_FILES 5
-#define SAVE_INTERVAL 10 // seconds
-
-int file_count = 1;
-time_t start_time, current_time;
-char filename[256];
-FILE *file;
-
-#endif 
+//	#if 1
+//	#include <time.h>
+//	
+//	#define MAX_FILES 5
+//	#define SAVE_INTERVAL 10 // seconds
+//	
+//	int file_count = 1;
+//	time_t start_time, current_time;
+//	char filename[256];
+//	FILE *file;
+//	
+//	#endif 
 
 	
 int audio_effect_init_ASPL(unsigned int rate,unsigned int channels, unsigned int frames, unsigned int bits)
@@ -198,8 +202,12 @@ int audio_effect_init_ASPL(unsigned int rate,unsigned int channels, unsigned int
 			  goto err;
 		}		
 
+    load_settings("/data/misc/aspl_bf_settings.txt", &settings);
+    print_settings(&settings);
+
     aspl_nr_config.enable = 1;
-    aspl_nr_config.sensitivity = 2;
+    aspl_nr_config.sensitivity = settings.nrlevel;
+	if (settings.nrlevel == 0) settings.ns = 0;
 
 	char* file_path = "/data/misc/aspl_nr_params_default.bin";
 	printf("ASPL Resampler INIT %s",file_path);
@@ -211,6 +219,8 @@ int audio_effect_init_ASPL(unsigned int rate,unsigned int channels, unsigned int
 
 	aspl_nr_config.aec_Mic_N = 2;
 	ret = aspl_AEC_create(&aspl_nr_config);
+
+
 
 	
 	return 0;
@@ -297,21 +307,25 @@ void audio_effect_process_ASPL(void *in, void *out, size_t frames)
 //		printf("ASPL effext Process %d",frames);
 	
 	// Mic 1-2CH DownSample
-	DoDnsample(&DownSampleHandle1,&AsplSrcBuf_48k[0][0], &AsplSrcBuf[0][0], frames, 3, 1.0);		
-	DoDnsample(&DownSampleHandle2,&AsplSrcBuf_48k[1][0], &AsplSrcBuf[1][0], frames, 3, 1.0);
+	DoDnsample(&DownSampleHandle1,&AsplSrcBuf_48k[0][0], &AsplSrcBuf[0][0], frames, 3, 3.0);
+	DoDnsample(&DownSampleHandle2,&AsplSrcBuf_48k[1][0], &AsplSrcBuf[1][0], frames, 3, 3.0);
 
 	// Ref DownSample
-	DoDnsample(&DownSampleHandle3,&AsplRefBuf_48k[0][0], &AsplRefBuf[0][0], frames, 3, 1.0);
-	DoDnsample(&DownSampleHandle4,&AsplRefBuf_48k[1][0], &AsplRefBuf[1][0], frames, 3, 1.0);
+	DoDnsample(&DownSampleHandle3,&AsplRefBuf_48k[0][0], &AsplRefBuf[0][0], frames, 3, 3.0);
+	DoDnsample(&DownSampleHandle4,&AsplRefBuf_48k[1][0], &AsplRefBuf[1][0], frames, 3, 3.0);
 
 //		speex_echo_cancellation(st, &AsplSrcBuf[0][0], &AsplRefBuf[0][0], &AsplOutBuf[0][0]);
 //		aspl_NR_process_2mic(&AsplOutBuf[0][0], 256, 1, 1, &DoAVal,  &aspl_nr_config);
 
-	aspl_AEC_process_2ch(&AsplSrcBuf[0][0], &AsplRefBuf[0][0], 256, -10, 0.0, &aspl_nr_config);
-	aspl_NR_process_2mic(&AsplSrcBuf[0][0], 256, 1, 1, &DoAVal,  &aspl_nr_config);
+	if (settings.aec == 1){
+		aspl_AEC_process_2ch(&AsplSrcBuf[0][0], &AsplSrcBuf[1][0], &AsplRefBuf[0][0], 256, -10, 0.0, &aspl_nr_config);
+	}
+	
+//		aspl_NR_process_2mic(&AsplSrcBuf[0][0], 256, 1, 1, &DoAVal,  &aspl_nr_config);
+	aspl_NR_process_2mic_enables(&AsplSrcBuf[0][0], 256, settings.beamnum, settings.beamauto, &DoAVal, settings.bf, settings.ns,  &aspl_nr_config);
 
 	
-	DoUpsample(&UpSampleHandle, &AsplSrcBuf[0][0], &TempResample[0], frames/3, 3, 3.0);
+	DoUpsample(&UpSampleHandle, &AsplSrcBuf[0][0], &TempResample[0], frames/3, 3, 1.0);
 //		DoUpsample(&UpSampleHandle2, &AsplSrcBuf[0][0], &TempResample[frames], frames/3, 3, 1.0);
 
 	for(i=0;i<frames;i++) {

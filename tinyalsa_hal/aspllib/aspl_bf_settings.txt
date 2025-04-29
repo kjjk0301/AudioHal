@@ -1,0 +1,6 @@
+bf=on
+ns=on
+aec=on
+beamauto=on
+beamnum=2
+nrlevel=1

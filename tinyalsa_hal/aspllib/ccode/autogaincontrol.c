@@ -196,8 +196,8 @@ void AGC_Init(agcInst_t *agcInst){
 		inst->x_peak_band[i] = 0;
 	}
 
-	inst->globalMakeupGain_dB = 15.0;
-	inst->threshold_dBFS = -18.0;
+	inst->globalMakeupGain_dB = 5.0;
+	inst->threshold_dBFS = -8.0;
 
 // #ifdef DEBUG_AGC_MATLAB
 // 	debug_matlab_open();

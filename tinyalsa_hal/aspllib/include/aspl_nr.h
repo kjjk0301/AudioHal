@@ -51,17 +51,6 @@ typedef struct aspl_NR_CONFIG_
   int SNR_current;
 
   void * Total_Inst_p;
-  // void * aecInst_p;
-
-  // int offset_Q15_L;
-  // int offset_Q15_R;
-
-  // float AEC_filter_save[2000];
-  // int AEC_filter_len;
-  // int AEC_globaldelay1024; // for 1024 buffer
-  // int AEC_globaldelay1600; // for 1600 buffer
-  // int AEC_filter_updated;
-  // int AEC_filter_loaded;  
 
   void * aecInst_p[4];
 
@@ -197,9 +186,12 @@ int aspl_NR_create_2mic(aspl_NR_CONFIG* config);
 int aspl_NR_process(short* data, int len, aspl_NR_CONFIG* config); // 1mic용 NR 수행 함수
 int aspl_NR_process_enables(short* data, int len, int NS_enable, int AGC_enable, int globalgain_dB, aspl_NR_CONFIG* config); // 1mic용 NR 수행 함수 with NS, AGC enable control and glabal gain control(dB) 
 int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double * pDoA, aspl_NR_CONFIG* config);
+int aspl_NR_process_2mic_enables(short* data, int len, int Beam1, int Beam_auto, double * pDoA, int bf_enable , int NS_enable, aspl_NR_CONFIG* config);
 
 int aspl_AEC_create(aspl_NR_CONFIG* config);
-int aspl_AEC_process_2ch(int16_t* data, int16_t* ref, int len, int aec_delay, float micscaledB, aspl_NR_CONFIG* config);
+//	int aspl_AEC_process_2ch(int16_t* data, int16_t* ref, int len, int aec_delay, float micscaledB, aspl_NR_CONFIG* config);
+int aspl_AEC_process_2ch(int16_t* data0, int16_t* data1, int16_t* ref, int len, int aec_delay, float micscaledB, aspl_NR_CONFIG* config);
+
 int aspl_AEC_process_single(int16_t* data, int16_t* ref, int len, int aec_delay, float micscaledB, aspl_NR_CONFIG* config);
 int aspl_AEC_process_filtersave(int16_t* data, int16_t* ref, int len, int aec_delay, int delayauto, float micscaledB, aspl_NR_CONFIG* config);
 int aspl_AEC_filterload(aspl_NR_CONFIG* config);
@@ -207,4 +199,3 @@ int aspl_AEC_filterload(aspl_NR_CONFIG* config);
 int aspl_cgn_process_single(int16_t* data, int len, float noisedBFS, aspl_NR_CONFIG* config);
 
 #endif
-

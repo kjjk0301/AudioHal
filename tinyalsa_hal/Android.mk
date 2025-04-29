@@ -33,6 +33,7 @@ commonSrcFiles := \
    voice/effect.c \
    aspllib/ResampleFilter.c \
    aspllib/aspl_nr.c \
+   aspllib/parsesetting.c \
    aspllib/ccode/audio_utils.c \
    aspllib/ccode/autogaincontrol.c \
    aspllib/ccode/beamforming.c \

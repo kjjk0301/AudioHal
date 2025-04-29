@@ -66,7 +66,7 @@ typedef signed int   int32_t;
 
 #define MicN      		MULTI_INPUT_CHANNELS 	// number of microphones 
 #define RefN      		2
-#define BeamN      		9         		// number of beam channels
+#define BeamN      		5         		// number of beam channels
 #define PolyinputN      MicN+REF_CHANNELS //INPUT_CHANNELS          // number of polyphase input signals
 #define PolyOutputN      MicN //OUTPUT_CHANNELS
 

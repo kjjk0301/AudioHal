@@ -23,9 +23,9 @@
 #include "aspl_nr.h"
 
 // Define version information
-#define LIBRARY_VERSION "0.5.7"
-#define RELEASE_DATE "2025-04-09"
-#define RELEASE_STATUS "fix ssl DoA result mismatch"
+#define LIBRARY_VERSION "0.5.8"
+#define RELEASE_DATE "2025-04-28"
+#define RELEASE_STATUS "The aspl 2ch process api with arguments added"
 
 void aspl_NR_expert_param_read(aspl_nr_params_t* tmp_p, aspl_NR_CONFIG* config);
 void aspl_NR_expert_param_write(aspl_nr_params_t* tmp_p, aspl_NR_CONFIG* config);
@@ -1530,6 +1530,27 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
     if (Total_Inst_p == NULL) {
         printf("aspl_NR_process_2mic :: (Total_Inst_t *)Total_Inst_p has not been created");
         return aspl_RET_FAIL;
+    }
+
+    aspl_NR_process_2mic_enables(data, len, Beam1, Beam_auto, pDoA, Total_Inst_p->bf_enable, Total_Inst_p->NS_enable, config);
+
+    return aspl_RET_SUCCESS;
+
+}
+
+int aspl_NR_process_2mic_enables(short* data, int len, int Beam1, int Beam_auto, double * pDoA, int bf_enable , int NS_enable, aspl_NR_CONFIG* config){
+
+
+    aspl_NR_CONFIG * config_p = config;
+    if (config_p == NULL) {
+        printf("aspl_NR_process_2mic_enables :: (aspl_NR_CONFIG *)config is NULL");
+        return aspl_RET_FAIL;
+    } 
+
+    Total_Inst_t * Total_Inst_p = (Total_Inst_t * )config_p->Total_Inst_p;
+    if (Total_Inst_p == NULL) {
+        printf("aspl_NR_process_2mic_enables :: (Total_Inst_t *)Total_Inst_p has not been created");
+        return aspl_RET_FAIL;
     }    
 
     polyInst_t* polyInstp = Total_Inst_p->polyInst_p;
@@ -1625,19 +1646,24 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
 
             if ((Total_Inst_p->DoA_mean != -1)){
                 Total_Inst_p->g_DoA = Total_Inst_p->DoA_mean;
-                if (Total_Inst_p->g_DoA < -60.0) Total_Inst_p->g_Beamno = 0;
-                else if (Total_Inst_p->g_DoA < -50.0) Total_Inst_p->g_Beamno = 1;
-                else if (Total_Inst_p->g_DoA < -35.0) Total_Inst_p->g_Beamno = 2;
-                else if (Total_Inst_p->g_DoA < -15.0) Total_Inst_p->g_Beamno = 3;
-                else if (Total_Inst_p->g_DoA < 15.0) Total_Inst_p->g_Beamno = 4;
-                else if (Total_Inst_p->g_DoA < 35.0) Total_Inst_p->g_Beamno = 5;
-                else if (Total_Inst_p->g_DoA < 50.0) Total_Inst_p->g_Beamno = 6;
-                else if (Total_Inst_p->g_DoA < 60.0) Total_Inst_p->g_Beamno = 7;
-                else Total_Inst_p->g_Beamno = 8;
+//	                if (Total_Inst_p->g_DoA < -60.0) Total_Inst_p->g_Beamno = 0;
+//	                else if (Total_Inst_p->g_DoA < -50.0) Total_Inst_p->g_Beamno = 1;
+//	                else if (Total_Inst_p->g_DoA < -35.0) Total_Inst_p->g_Beamno = 2;
+//	                else if (Total_Inst_p->g_DoA < -15.0) Total_Inst_p->g_Beamno = 3;
+//	                else if (Total_Inst_p->g_DoA < 15.0) Total_Inst_p->g_Beamno = 4;
+//	                else if (Total_Inst_p->g_DoA < 35.0) Total_Inst_p->g_Beamno = 5;
+//	                else if (Total_Inst_p->g_DoA < 50.0) Total_Inst_p->g_Beamno = 6;
+//	                else if (Total_Inst_p->g_DoA < 60.0) Total_Inst_p->g_Beamno = 7;
+//	                else Total_Inst_p->g_Beamno = 8;
+                if (Total_Inst_p->g_DoA < -60.0) Total_Inst_p->g_Beamno = 4; // -90
+                else if (Total_Inst_p->g_DoA < -30.0) Total_Inst_p->g_Beamno = 3; // -45
+                else if (Total_Inst_p->g_DoA < 30.0) Total_Inst_p->g_Beamno = 2; // 0
+                else if (Total_Inst_p->g_DoA < 60.0) Total_Inst_p->g_Beamno = 1; // 45
+                else Total_Inst_p->g_Beamno = 0; // 90
 
                 Total_Inst_p->no_DoA_cnt = 0;
                 printf("\n*************************************************************************\r\n");
-                printf("DoA = %.2f degree, Beam no = %d \r\n\n", Total_Inst_p->g_DoA, Total_Inst_p->g_Beamno);     
+                printf("DoA = %.2f degree, auto Beam no = %d manual Beam no = %d, Beam_auto=%d\r\n\n", Total_Inst_p->g_DoA, Total_Inst_p->g_Beamno, Beam1, Beam_auto);     
                 printf("*************************************************************************\r\n\n");		   
             } else {
                 Total_Inst_p->no_DoA_cnt++;
@@ -1667,7 +1693,7 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
             poly_analysis(polyInstp, (void*)work_buf[m], &Total_Inst_p->fft_in_mat[m][0], m, temp_scale);
         }
 
-        if (Total_Inst_p->bf_enable==1) {
+        if (bf_enable==1) {
 
             BF_process(bfInstp);
             BF_process_rear(bfInstp);
@@ -1689,16 +1715,16 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
             }	
         }            
 
-        if (Total_Inst_p->NS_enable==1){
+        if (NS_enable==1){
 
             if (Total_Inst_p->total_idx < 50) { // init period
-                if (Total_Inst_p->bf_enable==1) {
+                if (bf_enable==1) {
                     NS_oct_process(nsInstp, &Total_Inst_p->fft_bf_mat[Beam1][0], &Total_Inst_p->fft_ns_buf_mat[0], &Total_Inst_p->fft_out_mat[0][0], -1);
                 } else {
                     NS_oct_process(nsInstp, &Total_Inst_p->fft_in_mat[0][0], &Total_Inst_p->fft_ns_buf_mat[0], &Total_Inst_p->fft_out_mat[0][0], -1);
                 }                
             } else {
-                if (Total_Inst_p->bf_enable==1) {
+                if (bf_enable==1) {
                     NS_oct_process(nsInstp, &Total_Inst_p->fft_bf_mat[Beam1][0], &Total_Inst_p->fft_ns_buf_mat[0], &Total_Inst_p->fft_out_mat[0][0], Total_Inst_p->vad_max[0]+Total_Inst_p->vad_max[1]);                    
                 } else {
                     NS_oct_process(nsInstp, &Total_Inst_p->fft_in_mat[0][0], &Total_Inst_p->fft_ns_buf_mat[0], &Total_Inst_p->fft_out_mat[0][0], Total_Inst_p->vad_max[0]+Total_Inst_p->vad_max[1]);
@@ -1711,14 +1737,14 @@ int aspl_NR_process_2mic(short* data, int len, int Beam1, int Beam_auto, double 
         temp_scale = ((int)(1)<<(15-Total_Inst_p->poly_scale));
 
         outframe_p =  (void*)&inputbuf[0][j*NUM_FRAMES];
-        if (Total_Inst_p->bf_enable==1) {
-            if (Total_Inst_p->NS_enable==1){
+        if (bf_enable==1) {
+            if (NS_enable==1){
                 poly_synthesis(polyInstp, &Total_Inst_p->fft_out_mat[0][0], outframe_p, 0, temp_scale);
             } else {
                 poly_synthesis(polyInstp, &Total_Inst_p->fft_bf_mat[Beam1][0], outframe_p, 0, temp_scale);
             }
         } else {
-            if (Total_Inst_p->NS_enable==1){
+            if (NS_enable==1){
                 poly_synthesis(polyInstp, &Total_Inst_p->fft_out_mat[0][0], outframe_p, 0, temp_scale);
             } else {
                 poly_synthesis(polyInstp, &Total_Inst_p->fft_in_mat[0][0], outframe_p, 0, temp_scale);
@@ -1800,7 +1826,7 @@ int aspl_AEC_create(aspl_NR_CONFIG* config){
     return aspl_RET_SUCCESS;    
 }
 
-int aspl_AEC_process_2ch(int16_t* data, int16_t* ref, int len, int aec_delay, float micscaledB, aspl_NR_CONFIG* config){
+int aspl_AEC_process_2ch(int16_t* data0, int16_t* data1, int16_t* ref, int len, int aec_delay, float micscaledB, aspl_NR_CONFIG* config){
 
     aspl_NR_CONFIG * config_p = config;
     if (config_p == NULL) {
@@ -1819,10 +1845,12 @@ int aspl_AEC_process_2ch(int16_t* data, int16_t* ref, int len, int aec_delay, fl
 
     refs_in = (int16_t *)ref;
 
-    in_r  = (short *)data;
-    for (int k = 0; k < IN_CHANNELS_2MIC; k++) {
-        mics_in[k] = &in_r[k*len];	/* find the frame start for each microphone */
-    }
+//	    in_r  = (short *)data;
+//	    for (int k = 0; k < IN_CHANNELS_2MIC; k++) {
+//	        mics_in[k] = &in_r[k*len];	/* find the frame start for each microphone */
+//	    }
+	mics_in[0] = data0;
+	mics_in[1] = data1;
 
     ///////////////////////////   DC rejection         ////////////////////////////////////////
     for (int i = 0; i < len; i++) {
